@@ -35,7 +35,7 @@
 <body>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
-    右手の鏝で壁に近づきトリガーを引きながら塗る<br>
+    右手の鏝の<strong>刃を壁に近づけるだけ</strong>で塗れる<br>
     同じ場所を塗りすぎると赤いリングで警告<br>
     左手で「採点」「リセット」を操作
   </div>
@@ -77,49 +77,48 @@
     </a-entity>
 
     <!--
-      ===== 鏝の構造 (写真の通り) =====
+      ===== 右手 = 鏝 =====
+      oculus-touch-controls model:false → Quest コントローラーモデルを非表示
+      代わりに子要素の鏝モデルだけが見える → "柄を持っている感じ"
 
-      コントローラーは原点(0,0,0)。前方が -Z 方向。
+      鏝の寸法:
+        柄  : Y軸, z=0 (コントローラー = ユーザーの手元)
+        首  : Z軸, 長さ 0.04m (旧0.13の1/3), z=-0.02
+        刃  : XY平面, z=-0.042 (首の先端のすぐ前)
 
-      【柄】Y軸方向の円柱 → z=0 付近 (ユーザーの手元)
-      【首】Z軸方向の円柱 → 柄と刃を垂直に繋ぐ (z=0 → z=-0.13)
-      【刃】Y軸方向に長い薄い箱 → z=-0.14 (壁側)
-
-      柄と刃は共にY軸方向で「平行」。
-      首はZ軸方向で、柄・刃どちらにも「垂直」。
+      raycaster far=0.06 → 刃が壁から約2cm以内で判定
     -->
     <a-entity
       id="rightHand"
-      laser-controls="hand: right"
-      raycaster="objects: #wall; far: 0.16; lineOpacity: 0;"
+      oculus-touch-controls="hand: right; model: false"
+      raycaster="objects: #wall; far: 0.06; enabled: true; lineOpacity: 0;"
       trowel>
 
-      <!-- 柄頭 (持ち手の端、丸い) -->
+      <!-- 柄頭 (丸い端) -->
       <a-sphere position="0 -0.075 0" radius="0.023"
                 color="#C8A870" material="roughness: 0.8;"></a-sphere>
 
-      <!-- 木製の柄: Y 軸方向 (刃と平行) -->
+      <!-- 木製の柄: Y軸方向、コントローラー位置に重なる -->
       <a-cylinder position="0 0 0" radius="0.019" height="0.14"
                   color="#D4B896" material="roughness: 0.75;"></a-cylinder>
 
-      <!-- 首 (金属のシャフト): Z 軸方向、柄中心から刃へ垂直に伸びる -->
-      <!-- rotation="90 0 0" で Y→Z 向きに変換 -->
-      <a-cylinder position="0 0 -0.065" radius="0.007" height="0.13"
+      <!-- 首: Z軸方向、0.04m (旧0.13の1/3) -->
+      <a-cylinder position="0 0 -0.02" radius="0.007" height="0.04"
                   rotation="90 0 0"
                   color="#999999" material="metalness: 0.75; roughness: 0.3;"></a-cylinder>
 
-      <!-- 鋼の刃: Y 軸方向に長い (柄と平行)、Z 軸方向に薄い -->
-      <!-- 首の先端(z=-0.13)に接続 -->
-      <a-box position="0 0 -0.141" width="0.105" height="0.26" depth="0.002"
+      <!-- 鋼の刃: 首の先 (z=-0.042)、Y軸方向に長い (柄と平行) -->
+      <a-box position="0 0 -0.042" width="0.105" height="0.26" depth="0.002"
              color="#D0D0D0" material="metalness: 0.92; roughness: 0.12;"></a-box>
 
     </a-entity>
 
-    <!-- 左手 -->
+    <!-- 左手: ボタン操作用レーザー -->
     <a-entity
       id="leftHand"
       laser-controls="hand: left"
-      raycaster="objects: #resetBtn, #gradeBtn; far: 3; lineColor: #ffffff; lineOpacity: 0.5"></a-entity>
+      raycaster="objects: #resetBtn, #gradeBtn; far: 3; lineColor: #ffffff; lineOpacity: 0.5">
+    </a-entity>
 
     <a-light type="ambient" intensity="0.65"></a-light>
     <a-light type="directional" intensity="0.85" position="1 2 1"></a-light>
@@ -163,12 +162,12 @@
       if (arSupported) sceneEl.enterAR(); else sceneEl.enterVR();
     });
     sceneEl.addEventListener('enter-vr', () => {
-      ['enterAR','status','info'].forEach(id => {
+      ['enterAR', 'status', 'info'].forEach(id => {
         document.getElementById(id).style.display = 'none';
       });
     });
     sceneEl.addEventListener('exit-vr', () => {
-      ['enterAR','status','info'].forEach(id => {
+      ['enterAR', 'status', 'info'].forEach(id => {
         document.getElementById(id).style.display = 'block';
       });
     });
@@ -184,9 +183,10 @@
       for (let i = 0; i < 1500; i++) {
         wallCtx.fillStyle = `rgba(170,160,145,${Math.random() * 0.15})`;
         wallCtx.beginPath();
-        wallCtx.arc(Math.random() * wallCanvas.width,
-                    Math.random() * wallCanvas.height,
-                    Math.random() * 2.5, 0, Math.PI * 2);
+        wallCtx.arc(
+          Math.random() * wallCanvas.width,
+          Math.random() * wallCanvas.height,
+          Math.random() * 2.5, 0, Math.PI * 2);
         wallCtx.fill();
       }
     }
@@ -233,6 +233,7 @@
       wallCtx.arc(cx, cy, r, 0, Math.PI * 2);
       wallCtx.fill();
 
+      // 塗りすぎ警告
       if (avgT > 5) {
         wallCtx.strokeStyle = 'rgba(255,50,50,0.5)';
         wallCtx.lineWidth = 3;
@@ -255,7 +256,9 @@
     function setMessage(msg) {
       document.getElementById('hudMessage').setAttribute('value', msg);
       clearTimeout(msgTimer);
-      msgTimer = setTimeout(() => document.getElementById('hudMessage').setAttribute('value', ''), 4000);
+      msgTimer = setTimeout(() => {
+        document.getElementById('hudMessage').setAttribute('value', '');
+      }, 4000);
     }
 
     document.getElementById('resetBtn').addEventListener('click', () => {
@@ -273,26 +276,25 @@
         if (t > 0) painted++;
         if (t >= 2 && t <= 5) target++;
       }
-      const total    = thicknessMap.length;
-      const coverage = (painted / total * 100).toFixed(0);
+      const total     = thicknessMap.length;
+      const coverage  = (painted / total * 100).toFixed(0);
       const uniformity = painted > 0 ? (target / painted * 100).toFixed(0) : 0;
-      const overall  = (painted / total) * (target / Math.max(painted, 1)) * 100;
-      setMessage(`塗布率 ${coverage}% / 均一 ${uniformity}% / 総合 ${overall.toFixed(0)}点`);
+      const overall   = ((painted / total) * (target / Math.max(painted, 1)) * 100).toFixed(0);
+      setMessage(`塗布率 ${coverage}% / 均一 ${uniformity}% / 総合 ${overall}点`);
     });
 
-    /* ==================== 鏝コンポーネント ==================== */
+    /* ==================== 鏝コンポーネント ====================
+       ★ triggerdown 不要: raycaster が壁に当たった瞬間に塗る   */
     AFRAME.registerComponent('trowel', {
       init: function () {
-        this.painting  = false;
-        this.lastTick  = 0;
-        this.covCount  = 0;
-        this.el.addEventListener('triggerdown', () => { this.painting = true; });
-        this.el.addEventListener('triggerup',   () => { this.painting = false; });
-        window.addEventListener('mousedown', () => { this.painting = true; });
-        window.addEventListener('mouseup',   () => { this.painting = false; });
+        this.lastTick = 0;
+        this.covCount = 0;
+        // PC テスト用: マウスクリック中だけ塗る
+        this.mouseDown = false;
+        window.addEventListener('mousedown', () => { this.mouseDown = true; });
+        window.addEventListener('mouseup',   () => { this.mouseDown = false; });
       },
       tick: function () {
-        if (!this.painting) return;
         const now = performance.now();
         if (now - this.lastTick < 16) return;
         this.lastTick = now;
@@ -302,12 +304,18 @@
         const inters = raycaster.intersections;
         if (!inters || inters.length === 0) return;
 
+        // 壁への交点を探す
         let hit = null;
         for (const it of inters) {
           const el = it.object && it.object.el;
           if (el && el.id === 'wall') { hit = it; break; }
         }
         if (!hit) return;
+
+        // ★ Quest: 常に塗る (刃が壁に触れている = raycaster が当たっている)
+        // PC: マウスクリック中のみ (誤操作防止)
+        const isXR = sceneEl.is('vr-mode') || sceneEl.is('ar-mode');
+        if (!isXR && !this.mouseDown) return;
 
         paintAt(hit.uv);
         if (++this.covCount >= 10) { this.covCount = 0; updateCoverage(); }
