@@ -19,8 +19,7 @@
       padding: 18px 36px; font-size: 18px;
       background: #8B4513; color: white;
       border: none; border-radius: 10px;
-      cursor: pointer; z-index: 100;
-      font-weight: bold;
+      cursor: pointer; z-index: 100; font-weight: bold;
       box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
     #enterAR:hover:not(:disabled) { background: #A0522D; }
@@ -36,9 +35,9 @@
 <body>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
-    1) 右手の<strong>鏝</strong>で壁に届くまで近づき、トリガーを引きながら塗る<br>
-    2) 同じ場所を塗りすぎると赤いリングで警告<br>
-    3) 左手で「採点」「リセット」ボタンを操作
+    右手の鏝で壁に近づきトリガーを引きながら塗る<br>
+    同じ場所を塗りすぎると赤いリングで警告<br>
+    左手で「採点」「リセット」を操作
   </div>
 
   <button id="enterAR" disabled>確認中...</button>
@@ -54,10 +53,10 @@
       <canvas id="wallCanvas" width="1024" height="800"></canvas>
     </a-assets>
 
-    <!-- 壁 (届きやすいよう 70cm 前) -->
+    <!-- 壁 -->
     <a-plane
       id="wall"
-      position="0 1.45 -0.7"
+      position="0 1.3 -0.7"
       width="1.2" height="1.0"
       material="src: #wallCanvas; shader: standard; roughness: 0.9; metalness: 0;"></a-plane>
 
@@ -69,7 +68,7 @@
       <a-text id="hudMessage"  value="" position="0 -0.10 0.01" align="center" color="#FFD700" width="1.3" wrap-count="22"></a-text>
     </a-entity>
 
-    <!-- 操作ボタン (左手で押す) -->
+    <!-- ボタン -->
     <a-entity position="-0.95 1.35 -0.55" rotation="0 35 0">
       <a-box id="resetBtn" position="-0.16 0 0" width="0.26" height="0.12" depth="0.04" color="#a44"></a-box>
       <a-text value="リセット" position="-0.16 0 0.03" align="center" color="#fff" width="1.4"></a-text>
@@ -77,52 +76,58 @@
       <a-text value="採点" position="0.16 0 0.03" align="center" color="#fff" width="1.4"></a-text>
     </a-entity>
 
-    <!-- ===== 右手 = 鏝 (写真の形を再現) ===== -->
+    <!--
+      ===== 鏝の構造 (写真の通り) =====
+
+      コントローラーは原点(0,0,0)。前方が -Z 方向。
+
+      【柄】Y軸方向の円柱 → z=0 付近 (ユーザーの手元)
+      【首】Z軸方向の円柱 → 柄と刃を垂直に繋ぐ (z=0 → z=-0.13)
+      【刃】Y軸方向に長い薄い箱 → z=-0.14 (壁側)
+
+      柄と刃は共にY軸方向で「平行」。
+      首はZ軸方向で、柄・刃どちらにも「垂直」。
+    -->
     <a-entity
       id="rightHand"
       laser-controls="hand: right"
-      raycaster="objects: #wall; far: 0.22; lineOpacity: 0;"
+      raycaster="objects: #wall; far: 0.16; lineOpacity: 0;"
       trowel>
 
-      <!-- 柄頭 (手前の球) -->
-      <a-sphere position="0 0 0" radius="0.022" color="#C9A878"
-                material="roughness: 0.75;"></a-sphere>
+      <!-- 柄頭 (持ち手の端、丸い) -->
+      <a-sphere position="0 -0.075 0" radius="0.023"
+                color="#C8A870" material="roughness: 0.8;"></a-sphere>
 
-      <!-- 木製の柄 (明るい木目色) -->
-      <a-cylinder position="0 0 -0.06" radius="0.018" height="0.10"
-                  rotation="90 0 0" color="#D4B896"
-                  material="roughness: 0.75;"></a-cylinder>
+      <!-- 木製の柄: Y 軸方向 (刃と平行) -->
+      <a-cylinder position="0 0 0" radius="0.019" height="0.14"
+                  color="#D4B896" material="roughness: 0.75;"></a-cylinder>
 
-      <!-- 金属の首 (細い銀色のシャフト) -->
-      <a-cylinder position="0 0 -0.15" radius="0.0065" height="0.06"
-                  rotation="90 0 0" color="#9a9a9a"
-                  material="metalness: 0.7; roughness: 0.35;"></a-cylinder>
+      <!-- 首 (金属のシャフト): Z 軸方向、柄中心から刃へ垂直に伸びる -->
+      <!-- rotation="90 0 0" で Y→Z 向きに変換 -->
+      <a-cylinder position="0 0 -0.065" radius="0.007" height="0.13"
+                  rotation="90 0 0"
+                  color="#999999" material="metalness: 0.75; roughness: 0.3;"></a-cylinder>
 
-      <!-- 鋼の刃 (縦長 24cm × 10cm × 2mm、写真と同じ縦長プロポーション) -->
-      <a-box position="0 0 -0.19" width="0.10" height="0.24" depth="0.002"
-             color="#d8d8d8"
-             material="metalness: 0.9; roughness: 0.15;"></a-box>
+      <!-- 鋼の刃: Y 軸方向に長い (柄と平行)、Z 軸方向に薄い -->
+      <!-- 首の先端(z=-0.13)に接続 -->
+      <a-box position="0 0 -0.141" width="0.105" height="0.26" depth="0.002"
+             color="#D0D0D0" material="metalness: 0.92; roughness: 0.12;"></a-box>
+
     </a-entity>
 
-    <!-- 左手 = ボタン操作専用 -->
+    <!-- 左手 -->
     <a-entity
       id="leftHand"
       laser-controls="hand: left"
       raycaster="objects: #resetBtn, #gradeBtn; far: 3; lineColor: #ffffff; lineOpacity: 0.5"></a-entity>
 
-    <a-light type="ambient" intensity="0.7"></a-light>
-    <a-light type="directional" intensity="0.8" position="1 2 1"></a-light>
+    <a-light type="ambient" intensity="0.65"></a-light>
+    <a-light type="directional" intensity="0.85" position="1 2 1"></a-light>
+    <a-light type="directional" intensity="0.3" position="-1 1 0.5" color="#b0c8ff"></a-light>
   </a-scene>
 
   <script>
-    /* ==================== 設定 ==================== */
-    const SETTINGS = {
-      TARGET_THICKNESS_MIN: 2,
-      TARGET_THICKNESS_MAX: 5,
-      STROKE_RADIUS: 50
-    };
-
-    /* ==================== WebXR 起動 ==================== */
+    /* ==================== WebXR ==================== */
     const statusEl   = document.getElementById('status');
     const enterARBtn = document.getElementById('enterAR');
     const sceneEl    = document.querySelector('a-scene');
@@ -130,7 +135,7 @@
 
     async function checkAR() {
       if (!navigator.xr) {
-        statusEl.textContent = '✗ WebXR 非対応 (Meta Quest ブラウザを使用)';
+        statusEl.textContent = '✗ WebXR 非対応';
         enterARBtn.textContent = 'WebXR 非対応';
         return;
       }
@@ -142,7 +147,7 @@
           enterARBtn.textContent = 'Enter AR (MR)';
           enterARBtn.disabled = false;
         } else if (vrSupported) {
-          statusEl.textContent = '⚠ AR 非対応。VR モードで起動';
+          statusEl.textContent = '⚠ VR モードで起動';
           enterARBtn.textContent = 'Enter VR';
           enterARBtn.disabled = false;
         } else {
@@ -155,23 +160,22 @@
     checkAR();
 
     enterARBtn.addEventListener('click', () => {
-      if (arSupported) sceneEl.enterAR();
-      else sceneEl.enterVR();
+      if (arSupported) sceneEl.enterAR(); else sceneEl.enterVR();
     });
     sceneEl.addEventListener('enter-vr', () => {
-      enterARBtn.style.display = 'none';
-      statusEl.style.display = 'none';
-      document.getElementById('info').style.display = 'none';
+      ['enterAR','status','info'].forEach(id => {
+        document.getElementById(id).style.display = 'none';
+      });
     });
     sceneEl.addEventListener('exit-vr', () => {
-      enterARBtn.style.display = 'block';
-      statusEl.style.display = 'block';
-      document.getElementById('info').style.display = 'block';
+      ['enterAR','status','info'].forEach(id => {
+        document.getElementById(id).style.display = 'block';
+      });
     });
 
-    /* ==================== 壁・厚みマップ ==================== */
+    /* ==================== 壁テクスチャ ==================== */
     const wallCanvas = document.getElementById('wallCanvas');
-    const wallCtx = wallCanvas.getContext('2d');
+    const wallCtx    = wallCanvas.getContext('2d');
     let thicknessMap = new Uint8Array(wallCanvas.width * wallCanvas.height);
 
     function drawBaseTexture() {
@@ -189,39 +193,36 @@
     drawBaseTexture();
 
     function markTextureDirty() {
-      const wall = document.getElementById('wall');
-      const mesh = wall.getObject3D('mesh');
+      const mesh = document.getElementById('wall').getObject3D('mesh');
       if (mesh && mesh.material && mesh.material.map) {
         mesh.material.map.needsUpdate = true;
       }
     }
 
-    /* ==================== 塗布処理 ==================== */
+    /* ==================== 塗布 ==================== */
     function paintAt(uv) {
       const cx = uv.x * wallCanvas.width;
       const cy = (1 - uv.y) * wallCanvas.height;
-      const r  = SETTINGS.STROKE_RADIUS;
+      const r  = 50;
 
       const x0 = Math.max(0, Math.floor(cx - r));
       const x1 = Math.min(wallCanvas.width,  Math.ceil(cx + r));
       const y0 = Math.max(0, Math.floor(cy - r));
       const y1 = Math.min(wallCanvas.height, Math.ceil(cy + r));
-      let avgThickness = 0, sampleCount = 0;
+      let avgT = 0, cnt = 0;
       for (let y = y0; y < y1; y++) {
         for (let x = x0; x < x1; x++) {
           const dx = x - cx, dy = y - cy;
           const d2 = dx*dx + dy*dy;
           if (d2 > r*r) continue;
           const idx = y * wallCanvas.width + x;
-          const falloff = 1 - Math.sqrt(d2) / r;
-          if (Math.random() < falloff * 0.35) {
+          if (Math.random() < (1 - Math.sqrt(d2) / r) * 0.35) {
             if (thicknessMap[idx] < 255) thicknessMap[idx]++;
           }
-          avgThickness += thicknessMap[idx];
-          sampleCount++;
+          avgT += thicknessMap[idx]; cnt++;
         }
       }
-      if (sampleCount > 0) avgThickness /= sampleCount;
+      if (cnt) avgT /= cnt;
 
       const grad = wallCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
       grad.addColorStop(0,   '#8B4513DD');
@@ -232,75 +233,59 @@
       wallCtx.arc(cx, cy, r, 0, Math.PI * 2);
       wallCtx.fill();
 
-      if (avgThickness > SETTINGS.TARGET_THICKNESS_MAX) {
-        wallCtx.strokeStyle = 'rgba(255, 50, 50, 0.5)';
+      if (avgT > 5) {
+        wallCtx.strokeStyle = 'rgba(255,50,50,0.5)';
         wallCtx.lineWidth = 3;
         wallCtx.beginPath();
         wallCtx.arc(cx, cy, r * 0.6, 0, Math.PI * 2);
         wallCtx.stroke();
       }
-
       markTextureDirty();
     }
 
-    /* ==================== 採点・HUD ==================== */
-    function calculateScore() {
-      let painted = 0, target = 0;
-      const total = thicknessMap.length;
-      for (let i = 0; i < total; i++) {
-        const t = thicknessMap[i];
-        if (t > 0) painted++;
-        if (t >= SETTINGS.TARGET_THICKNESS_MIN && t <= SETTINGS.TARGET_THICKNESS_MAX) target++;
-      }
-      const coverage   = (painted / total) * 100;
-      const uniformity = painted > 0 ? (target / painted) * 100 : 0;
-      const overall    = (coverage / 100) * (uniformity / 100) * 100;
-      return { coverage, uniformity, overall };
-    }
-
-    function updateCoverageDisplay() {
+    /* ==================== HUD ==================== */
+    function updateCoverage() {
       let painted = 0;
-      for (let i = 0; i < thicknessMap.length; i++) {
-        if (thicknessMap[i] > 0) painted++;
-      }
-      const pct = (painted / thicknessMap.length) * 100;
-      document.getElementById('hudCoverage')
-              .setAttribute('value', `塗布率: ${pct.toFixed(0)}%`);
+      for (let i = 0; i < thicknessMap.length; i++) if (thicknessMap[i] > 0) painted++;
+      const pct = (painted / thicknessMap.length * 100).toFixed(0);
+      document.getElementById('hudCoverage').setAttribute('value', `塗布率: ${pct}%`);
     }
 
-    let messageTimer = null;
+    let msgTimer = null;
     function setMessage(msg) {
       document.getElementById('hudMessage').setAttribute('value', msg);
-      clearTimeout(messageTimer);
-      messageTimer = setTimeout(() => {
-        document.getElementById('hudMessage').setAttribute('value', '');
-      }, 4000);
+      clearTimeout(msgTimer);
+      msgTimer = setTimeout(() => document.getElementById('hudMessage').setAttribute('value', ''), 4000);
     }
 
-    function resetWall() {
+    document.getElementById('resetBtn').addEventListener('click', () => {
       thicknessMap = new Uint8Array(wallCanvas.width * wallCanvas.height);
       drawBaseTexture();
       markTextureDirty();
-      updateCoverageDisplay();
+      updateCoverage();
       setMessage('壁をリセットしました');
-    }
-
-    /* ==================== ボタン ==================== */
-    document.getElementById('resetBtn').addEventListener('click', resetWall);
-    document.getElementById('gradeBtn').addEventListener('click', () => {
-      const s = calculateScore();
-      setMessage(
-        `塗布率 ${s.coverage.toFixed(0)}% / 均一 ${s.uniformity.toFixed(0)}% / 総合 ${s.overall.toFixed(0)}点`
-      );
     });
 
-    /* ==================== 鏝 (trowel) コンポーネント ==================== */
+    document.getElementById('gradeBtn').addEventListener('click', () => {
+      let painted = 0, target = 0;
+      for (let i = 0; i < thicknessMap.length; i++) {
+        const t = thicknessMap[i];
+        if (t > 0) painted++;
+        if (t >= 2 && t <= 5) target++;
+      }
+      const total    = thicknessMap.length;
+      const coverage = (painted / total * 100).toFixed(0);
+      const uniformity = painted > 0 ? (target / painted * 100).toFixed(0) : 0;
+      const overall  = (painted / total) * (target / Math.max(painted, 1)) * 100;
+      setMessage(`塗布率 ${coverage}% / 均一 ${uniformity}% / 総合 ${overall.toFixed(0)}点`);
+    });
+
+    /* ==================== 鏝コンポーネント ==================== */
     AFRAME.registerComponent('trowel', {
       init: function () {
-        this.painting = false;
-        this.lastTick = 0;
-        this.coverageCounter = 0;
-
+        this.painting  = false;
+        this.lastTick  = 0;
+        this.covCount  = 0;
         this.el.addEventListener('triggerdown', () => { this.painting = true; });
         this.el.addEventListener('triggerup',   () => { this.painting = false; });
         window.addEventListener('mousedown', () => { this.painting = true; });
@@ -308,7 +293,6 @@
       },
       tick: function () {
         if (!this.painting) return;
-
         const now = performance.now();
         if (now - this.lastTick < 16) return;
         this.lastTick = now;
@@ -326,16 +310,11 @@
         if (!hit) return;
 
         paintAt(hit.uv);
-
-        this.coverageCounter++;
-        if (this.coverageCounter >= 10) {
-          this.coverageCounter = 0;
-          updateCoverageDisplay();
-        }
+        if (++this.covCount >= 10) { this.covCount = 0; updateCoverage(); }
       }
     });
 
-    updateCoverageDisplay();
+    updateCoverage();
   </script>
 </body>
 </html>
