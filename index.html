@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>左官MRプロトタイプ</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- A-Frame 本体 -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <style>
+    body { margin: 0; font-family: -apple-system, "Hiragino Sans", sans-serif; }
+    #info {
+      position: fixed; top: 12px; left: 12px;
+      background: rgba(0,0,0,0.65); color: #fff;
+      padding: 10px 14px; border-radius: 8px;
+      font-size: 13px; line-height: 1.6; z-index: 100;
+      max-width: 320px;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <strong>左官MRプロトタイプ</strong><br>
+    1) Quest 3 のブラウザで開く<br>
+    2) 右下「Enter VR」を押す<br>
+    3) 右コントローラーで壁に触れて泥を塗る<br>
+    4) 左のパレットを左コントローラーで選んで色変更
+  </div>
+
+  <a-scene
+    background="color: #ECECEC"
+    webxr="optionalFeatures: hit-test, local-floor"
+    renderer="colorManagement: true; antialias: true; physicallyCorrectLights: true">
+
+    <!-- 動的に書き換える Canvas を asset として登録 -->
+    <a-assets>
+      <canvas id="wallCanvas" width="1024" height="768"></canvas>
+    </a-assets>
+
+    <!-- 壁本体: Canvas をテクスチャとして使う -->
+    <a-plane
+      id="wall"
+      position="0 1.5 -1.2"
+      width="2" height="1.5"
+      material="src: #wallCanvas; shader: standard; roughness: 0.9; metalness: 0;"
+      paintable></a-plane>
+
+    <!-- 床（参考の目印・MR では薄く透ける） -->
+    <a-plane position="0 0 0" rotation="-90 0 0" width="6" height="6"
+             color="#C8B89D" opacity="0.25"></a-plane>
+
+    <!-- 右手 = コテ（壁を塗る） -->
+    <a-entity
+      id="rightHand"
+      laser-controls="hand: right"
+      raycaster="objects: #wall; far: 2; lineColor: #8B4513; lineOpacity: 0.7"></a-entity>
+
+    <!-- 左手 = パレット選択 -->
+    <a-entity
+      id="leftHand"
+      laser-controls="hand: left"
+      raycaster="objects: .palette; far: 2; lineColor: #ffffff; lineOpacity: 0.5"></a-entity>
+
+    <!-- カラーパレット（左手で指して選ぶ） -->
+    <a-entity position="-1.1 1.5 -0.6" rotation="0 30 0">
+      <a-text value="Palette" position="0 0.45 0" align="center" color="#333" width="1.2"></a-text>
+      <a-box class="palette" position="0  0.30 0" width="0.16" height="0.16" depth="0.02"
+             color="#8B4513" data-color="#8B4513"></a-box>
+      <a-box class="palette" position="0  0.10 0" width="0.16" height="0.16" depth="0.02"
+             color="#A0826D" data-color="#A0826D"></a-box>
+      <a-box class="palette" position="0 -0.10 0" width="0.16" height="0.16" depth="0.02"
+             color="#C8B89D" data-color="#C8B89D"></a-box>
+      <a-box class="palette" position="0 -0.30 0" width="0.16" height="0.16" depth="0.02"
+             color="#5C4033" data-color="#5C4033"></a-box>
+    </a-entity>
+
+    <!-- 照明 -->
+    <a-light type="ambient" intensity="0.6"></a-light>
+    <a-light type="directional" intensity="0.6" position="1 2 1"></a-light>
+
+  </a-scene>
+
+  <script>
+    /* ---------- 1. 壁 Canvas の初期化（漆喰風の下地） ---------- */
+    (function initWallTexture () {
+      const canvas = document.getElementById('wallCanvas');
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#EDE5D8';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // 軽く粒状のテクスチャを乗せて壁らしさを出す
+      for (let i = 0; i < 1500; i++) {
+        ctx.fillStyle = `rgba(170,160,145,${Math.random() * 0.15})`;
+        ctx.beginPath();
+        ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height,
+                Math.random() * 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    })();
+
+    /* ---------- 2. 現在の塗料色（パレットで切替） ---------- */
+    let currentColor = '#8B4513'; // 初期: 茶色（土）
+
+    document.querySelectorAll('.palette').forEach(el => {
+      el.addEventListener('click', () => {
+        currentColor = el.dataset.color;
+        // 選択フィードバック: 一瞬だけ拡大
+        el.setAttribute('scale', '1.25 1.25 1.25');
+        setTimeout(() => el.setAttribute('scale', '1 1 1'), 150);
+      });
+    });
+
+    /* ---------- 3. paintable コンポーネント ----------
+       レイキャスタが当たり続けている間、UV 座標を取って
+       Canvas に円を描き、テクスチャを更新する */
+    AFRAME.registerComponent('paintable', {
+      init: function () {
+        this.canvas = document.getElementById('wallCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.intersectedEl = null;
+        this.lastPaint = 0;
+
+        this.el.addEventListener('raycaster-intersected', (evt) => {
+          this.intersectedEl = evt.detail.el;
+        });
+        this.el.addEventListener('raycaster-intersected-cleared', () => {
+          this.intersectedEl = null;
+        });
+      },
+      tick: function () {
+        if (!this.intersectedEl) return;
+        const raycaster = this.intersectedEl.components.raycaster;
+        if (!raycaster) return;
+        const intersection = raycaster.getIntersection(this.el);
+        if (!intersection || !intersection.uv) return;
+
+        // 約 60fps を上限に
+        const now = performance.now();
+        if (now - this.lastPaint < 16) return;
+        this.lastPaint = now;
+
+        const uv = intersection.uv;
+        const x = uv.x * this.canvas.width;
+        const y = (1 - uv.y) * this.canvas.height;
+
+        // 半透明のラジアルグラデで「塗り重ね」感を出す
+        const radius = 55;
+        const grad = this.ctx.createRadialGradient(x, y, 0, x, y, radius);
+        grad.addColorStop(0,   currentColor + 'EE');
+        grad.addColorStop(0.6, currentColor + 'AA');
+        grad.addColorStop(1,   currentColor + '00');
+        this.ctx.fillStyle = grad;
+        this.ctx.beginPath();
+        this.ctx.arc(x, y, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        // three.js 側にテクスチャ更新を通知
+        const mesh = this.el.getObject3D('mesh');
+        if (mesh && mesh.material && mesh.material.map) {
+          mesh.material.map.needsUpdate = true;
+        }
+      }
+    });
+  </script>
+</body>
+</html>
