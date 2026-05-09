@@ -115,7 +115,7 @@
             trowelMortar=Math.min(TROWEL_MAX, trowelMortar+amt);
             if (typeof updateMortarVisuals==='function') updateMortarVisuals();
             /* すくいハプティクス */
-            hapticPulse(0.30, 80);
+            hapticPulse(this.el, 0.30, 80);
           }
         }
 
@@ -148,7 +148,7 @@
 
         /* 壁接触ハプティクス */
         if (!this.wasContact) {
-          hapticPulse(0.65, 55);
+          hapticPulse(this.el, 0.65, 55);
 
           /* 始端の弧 */
           if (uvHits.length >= 2 && typeof drawStrokeEdge === 'function') {
@@ -165,7 +165,7 @@
 
         if (this.smoothing) {
           if (typeof smoothBlade==='function') smoothBlade(uvHits);
-          hapticPulse(0.08, 20);
+          hapticPulse(this.el, 0.08, 20);
         } else {
           if (trowelMortar<=0) { lastCenterUV=null; return; }
           /* 終端弧のために前フレームの情報を保存 */
@@ -177,7 +177,7 @@
           this._lastAngle    = Math.atan2(dyT, dxT);
 
           if (typeof paintBlade==='function') paintBlade(uvHits);
-          hapticPulse(0.13, 20);
+          hapticPulse(this.el, 0.13, 20);
           if (++this.covCount>=10) { this.covCount=0; if (typeof updateCoverage==='function') updateCoverage(); }
         }
       }
@@ -215,7 +215,7 @@
   </style>
 </head>
 <body>
-  <div id="version">v2.7</div>
+  <div id="version">v2.8</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
     🅐 壁を設置<br>
@@ -391,16 +391,24 @@
     sceneEl.addEventListener('exit-vr',  ()=>
       UI_IDS.forEach(id=>document.getElementById(id).style.display='block'));
 
-    /* ==================== ハプティクス (常に右コン) ==================== */
-    function hapticPulse(intensity, durationMs) {
-      // A-Frame 1.5 では renderer.xr.getSession() でセッションを取得
-      const session = sceneEl.renderer?.xr?.getSession?.();
-      if (!session || !session.inputSources) return;
-      for (const src of session.inputSources) {
-        if (src.handedness !== 'right') continue; // 右コン固定
-        const acts = src.gamepad?.hapticActuators;
-        if (acts && acts.length > 0) acts[0].pulse(intensity, durationMs);
-      }
+    /* ==================== ハプティクス (右手エンティティから直接取得) ==================== */
+    function hapticPulse(rightHandEl, intensity, durationMs) {
+      try {
+        /* A-Frame 1.5: tracked-controls-webxr に controller が格納されている */
+        const tc = rightHandEl?.components?.['tracked-controls-webxr'];
+        if (tc?.controller?.gamepad?.hapticActuators?.length > 0) {
+          tc.controller.gamepad.hapticActuators[0].pulse(intensity, durationMs);
+          return;
+        }
+        /* フォールバック: session.inputSources を 'right' でフィルタ */
+        const session = sceneEl.renderer?.xr?.getSession?.();
+        if (!session?.inputSources) return;
+        for (const src of session.inputSources) {
+          if (src.handedness !== 'right') continue;
+          const acts = src.gamepad?.hapticActuators;
+          if (acts?.length > 0) { acts[0].pulse(intensity, durationMs); return; }
+        }
+      } catch(e) { /* ハプティクス非対応環境では無視 */ }
     }
 
     /* ==================== ハイトマップ (Float32バッファ方式) ====================
