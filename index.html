@@ -102,24 +102,18 @@
         if (!obj) return;
 
         /* ==== すくい判定 ====
-           XR:  トリガー + 刃が鏝板に近い
-           PC:  右クリック + 近い                */
-        const scooping = isXR ? this.triggerDown : this.triggerDown;
-        if (scooping) {
-          const leftEl = document.getElementById('leftHand');
-          if (leftEl && leftEl.object3D) {
-            // 鏝板中心 (左手ローカル: 鏝板の表面位置)
-            this._hawkPos.set(0, 0.012, -0.15).applyMatrix4(leftEl.object3D.matrixWorld);
-            // 鏝の刃中心 (右手ローカル)
-            this._bladeCenter.set(0, 0.015, -0.042).applyMatrix4(obj.matrixWorld);
+           鏝板に刃が近づくだけで自動すくい (トリガー不要) */
+        const leftEl = document.getElementById('leftHand');
+        if (leftEl && leftEl.object3D) {
+          this._hawkPos.set(0, 0.012, -0.15).applyMatrix4(leftEl.object3D.matrixWorld);
+          this._bladeCenter.set(0, 0.015, -0.042).applyMatrix4(obj.matrixWorld);
 
-            const dist = this._bladeCenter.distanceTo(this._hawkPos);
-            if (dist < SCOOP_DIST && hawkMortar > 0 && trowelMortar < TROWEL_MAX) {
-              const amt = Math.min(SCOOP_RATE, hawkMortar, TROWEL_MAX - trowelMortar);
-              hawkMortar   = Math.max(0, hawkMortar   - amt);
-              trowelMortar = Math.min(TROWEL_MAX, trowelMortar + amt);
-              if (typeof updateMortarVisuals === 'function') updateMortarVisuals();
-            }
+          const dist = this._bladeCenter.distanceTo(this._hawkPos);
+          if (dist < SCOOP_DIST && hawkMortar > 0 && trowelMortar < TROWEL_MAX) {
+            const amt = Math.min(SCOOP_RATE, hawkMortar, TROWEL_MAX - trowelMortar);
+            hawkMortar   = Math.max(0, hawkMortar   - amt);
+            trowelMortar = Math.min(TROWEL_MAX, trowelMortar + amt);
+            if (typeof updateMortarVisuals === 'function') updateMortarVisuals();
           }
         }
 
@@ -178,12 +172,12 @@
   </style>
 </head>
 <body>
-  <div id="version">v1.8</div>
+  <div id="version">v1.9</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
     🅐 コントローラー位置に壁を設置<br>
     左グリップ(後ろ) 鏝板に補充<br>
-    右トリガー + 鏝板に近づける → すくう<br>
+    鏝板に刃を近づける → 自動ですくう<br>
     壁に刃を近づける → 塗る (泥が必要)<br>
     左手で「採点」「リセット」
   </div>
