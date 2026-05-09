@@ -145,6 +145,12 @@
       this._lastAngle     = 0;
       this.mouseDown      = false;
 
+      /* コテ返し用 */
+      this.hawkEntryQuat  = null;   // 鏝板に入った瞬間のクォータニオン
+      this.koteGaeshiDone = false;  // コテ返し完了フラグ
+      this._lastPos       = new THREE.Vector3(); // 速度計算用
+      this.currentSpeed   = 0;
+
       this.threeRC     = new THREE.Raycaster();
       this.threeRC.far = 0.08;
 
@@ -196,18 +202,41 @@
       const isXR=sceneEl.is('vr-mode')||sceneEl.is('ar-mode');
       const obj=this.el.object3D; if(!obj) return;
 
-      /* すくい */
+      /* コントローラー速度を計算 */
+      const curPos=new THREE.Vector3();
+      obj.getWorldPosition(curPos);
+      this.currentSpeed = curPos.distanceTo(this._lastPos) * 60 * 100; // cm/s 相当
+      this._lastPos.copy(curPos);
+
+      /* ===== コテ返し検出 (鏝板に近づいて手首をひねる) ===== */
       const leftEl=document.getElementById('leftHand');
       if(leftEl?.object3D) {
         this._hawkPos.set(0,0.012,-0.15).applyMatrix4(leftEl.object3D.matrixWorld);
         this._bladeCenter.set(0,0.015,-0.042).applyMatrix4(obj.matrixWorld);
         const dist=this._bladeCenter.distanceTo(this._hawkPos);
-        if(dist<SCOOP_DIST&&hawkMortar>0&&trowelMortar<TROWEL_MAX) {
-          const amt=Math.min(SCOOP_RATE,hawkMortar,TROWEL_MAX-trowelMortar);
-          hawkMortar=Math.max(0,hawkMortar-amt);
-          trowelMortar=Math.min(TROWEL_MAX,trowelMortar+amt);
-          if(typeof updateMortarVisuals==='function') updateMortarVisuals();
-          hapticPulse(0.30,80);
+
+        if(dist<SCOOP_DIST) {
+          /* 鏝板ゾーン内: クォータニオンの変化でひねりを検出 */
+          if(!this.hawkEntryQuat) {
+            this.hawkEntryQuat=obj.quaternion.clone();
+            if(typeof setMessage==='function') setMessage('手首をひねってコテ返し！');
+          }
+          const twist=obj.quaternion.angleTo(this.hawkEntryQuat);
+          if(twist > Math.PI*0.5 && !this.koteGaeshiDone && hawkMortar>0) {
+            /* コテ返し成功! */
+            const amt=Math.min(KOTE_AMOUNT, hawkMortar);
+            hawkMortar=Math.max(0,hawkMortar-amt);
+            trowelMortar=Math.min(TROWEL_MAX,trowelMortar+amt);
+            this.koteGaeshiDone=true;
+            this.hawkEntryQuat=null; // リセット (次のコテ返し用)
+            if(typeof updateMortarVisuals==='function') updateMortarVisuals();
+            if(typeof setMessage==='function') setMessage('コテ返し ✓ 材料を乗せました');
+            hapticPulse(0.55,150);
+            if(typeof sound!=='undefined') sound.playKoteGaeshi();
+          }
+        } else {
+          /* 鏝板ゾーン外 */
+          this.hawkEntryQuat=null;
         }
       }
 
@@ -234,6 +263,8 @@
                          this.wasContact ? this._lastPainter?.colorCtx : null);
           if(this._lastPainter) this._lastPainter.colorTex.needsUpdate=true;
         }
+        /* 壁から離れた → 塗り音を停止 */
+        if(this.wasContact && typeof sound!=='undefined') sound.stopScraping();
         lastCenterUV=null; this.wasContact=false; return;
       }
 
@@ -249,6 +280,8 @@
 
       if(!this.wasContact) {
         hapticPulse(0.65,55);
+        /* 壁に触れた瞬間 → 接触音 */
+        if(typeof sound!=='undefined') sound.startScraping(this.currentSpeed);
         const pts2=uvHits.map(uv=>({x:uv.x*hitEntry.painter.W, y:(1-uv.y)*hitEntry.painter.H}));
         const f2=pts2[0], l2=pts2[pts2.length-1];
         const dx2=l2.x-f2.x, dy2=l2.y-f2.y;
@@ -257,6 +290,9 @@
           drawStrokeEdge(pts2[Math.floor(pts2.length/2)], hb2, Math.atan2(dy2,dx2), true, hitEntry.painter.colorCtx);
         if(hitEntry.painter) hitEntry.painter.colorTex.needsUpdate=true;
         this.wasContact=true;
+      } else {
+        /* 塗り中 → 速度に合わせて音を更新 */
+        if(typeof sound!=='undefined') sound.updateScraping(this.currentSpeed);
       }
 
       const painter=hitEntry.painter;
@@ -264,7 +300,15 @@
         if(typeof smoothSurface==='function') smoothSurface(painter, uvHits);
         hapticPulse(0.08,20);
       } else {
-        if(trowelMortar<=0) { lastCenterUV=null; return; }
+        /* ★ コテ返しが済んでいないと塗れない */
+        if(!this.koteGaeshiDone) {
+          if(typeof setMessage==='function') setMessage('先にコテ返しで材料を取ってください');
+          return;
+        }
+        if(trowelMortar<=0) {
+          this.koteGaeshiDone=false; // 泥切れ → 次のコテ返しが必要
+          lastCenterUV=null; return;
+        }
         const pts3=uvHits.map(uv=>({x:uv.x*painter.W, y:(1-uv.y)*painter.H}));
         const f3=pts3[0], l3=pts3[pts3.length-1];
         const dx3=l3.x-f3.x, dy3=l3.y-f3.y;
@@ -310,13 +354,13 @@
   </style>
 </head>
 <body>
-  <div id="version">v3.0</div>
+  <div id="version">v3.1</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
-    Enter AR → Quest 3 が部屋を自動認識<br>
-    検出した壁に直接塗れる<br>
-    ドア=赤 / 窓=青 で障害物表示<br>
-    🅐 静的壁を手元に設置 (フォールバック)
+    鏝板に鏝を近づけ<strong>手首をひねる</strong> → コテ返し<br>
+    コテ返し後に壁を塗れる / 泥切れで再コテ返し<br>
+    速く動かす=高音「シュッ」/ 遅く=低音「ズズー」<br>
+    Enter AR → Quest 3 が部屋を自動認識
   </div>
   <button id="enterAR" disabled>確認中...</button>
   <div id="status">WebXR 確認中...</div>
@@ -500,7 +544,10 @@
   checkAR();
 
   const UI_IDS=['enterAR','status','info','version'];
-  enterARBtn.addEventListener('click',()=>{ if(arSupported) sceneEl.enterAR(); else sceneEl.enterVR(); });
+  enterARBtn.addEventListener('click',()=>{
+    sound.init(); // ユーザー操作内で AudioContext を起動
+    if(arSupported) sceneEl.enterAR(); else sceneEl.enterVR();
+  });
   sceneEl.addEventListener('enter-vr',()=> UI_IDS.forEach(id=>document.getElementById(id).style.display='none'));
   sceneEl.addEventListener('exit-vr', ()=> UI_IDS.forEach(id=>document.getElementById(id).style.display='block'));
 
@@ -530,6 +577,97 @@
   let hawkMortar   = 100;
   let trowelMortar = 0;
   const TROWEL_MAX=60, SCOOP_RATE=2.5, PAINT_COST=0.35, SCOOP_DIST=0.22;
+  const KOTE_AMOUNT = 50; // コテ返し1回で移る量
+
+  /* ==================== サウンドシステム (Web Audio API) ==================== */
+  const sound = {
+    ctx: null,
+    noiseBuffer: null,
+    scrapingNode: null,
+    scrapingGain: null,
+    scrapingFilter: null,
+
+    init() {
+      if (this.ctx) return;
+      try {
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        /* 2秒分のホワイトノイズバッファを事前生成 */
+        const sr = this.ctx.sampleRate;
+        const buf = this.ctx.createBuffer(1, sr * 2, sr);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        this.noiseBuffer = buf;
+      } catch(e) {}
+    },
+
+    /* 塗り音: ノイズをバンドパスフィルタで成形
+       遅い → 低周波「ズズー」/ 速い → 高周波「シュッ」 */
+    startScraping(speed) {
+      if (!this.ctx || !this.noiseBuffer) return;
+      this.stopScraping();
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      src.loop = true;
+
+      this.scrapingFilter = this.ctx.createBiquadFilter();
+      this.scrapingFilter.type = 'bandpass';
+      this.scrapingFilter.frequency.value = this._speedToFreq(speed);
+      this.scrapingFilter.Q.value = 3.5;
+
+      this.scrapingGain = this.ctx.createGain();
+      this.scrapingGain.gain.value = 0;
+      this.scrapingGain.gain.linearRampToValueAtTime(0.10, this.ctx.currentTime + 0.04);
+
+      src.connect(this.scrapingFilter);
+      this.scrapingFilter.connect(this.scrapingGain);
+      this.scrapingGain.connect(this.ctx.destination);
+      src.start();
+      this.scrapingNode = src;
+    },
+
+    updateScraping(speed) {
+      if (!this.scrapingFilter) return;
+      this.scrapingFilter.frequency.setTargetAtTime(
+        this._speedToFreq(speed), this.ctx.currentTime, 0.06
+      );
+    },
+
+    stopScraping() {
+      if (!this.scrapingNode) return;
+      try {
+        this.scrapingGain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.04);
+        const n = this.scrapingNode;
+        setTimeout(() => { try { n.stop(); } catch(e){} }, 200);
+      } catch(e) {}
+      this.scrapingNode = null;
+      this.scrapingGain = null;
+      this.scrapingFilter = null;
+    },
+
+    /* コテ返し成功音: 湿った「ペチャッ」 */
+    playKoteGaeshi() {
+      if (!this.ctx || !this.noiseBuffer) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+
+      const filt = this.ctx.createBiquadFilter();
+      filt.type = 'lowpass';
+      filt.frequency.setValueAtTime(500, this.ctx.currentTime);
+      filt.frequency.exponentialRampToValueAtTime(80, this.ctx.currentTime + 0.18);
+
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.55, this.ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.28);
+
+      src.connect(filt); filt.connect(gain); gain.connect(this.ctx.destination);
+      src.start(); src.stop(this.ctx.currentTime + 0.30);
+    },
+
+    _speedToFreq(speed) {
+      /* speed 0→遅い(200Hz「ズ」), 20以上→速い(1800Hz「シュ」) */
+      return 200 + Math.min(Math.max(speed, 0), 20) * 80;
+    }
+  };
   let lastCenterUV = null;
 
   function makeBar(val,max,len=8){
