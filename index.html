@@ -112,7 +112,7 @@
             trowelMortar=Math.min(TROWEL_MAX, trowelMortar+amt);
             if (typeof updateMortarVisuals==='function') updateMortarVisuals();
             /* すくいハプティクス */
-            hapticPulse('right', 0.30, 80);
+            hapticPulse(0.30, 80);
           }
         }
 
@@ -140,19 +140,19 @@
 
         /* ==== 壁接触ハプティクス ==== */
         if (!this.wasContact) {
-          hapticPulse('right', 0.65, 55); // 接触: 短く強く
+          hapticPulse(0.65, 55); // 接触: 短く強く
           this.wasContact=true;
         }
 
         if (this.smoothing) {
           /* 均しモード */
           if (typeof smoothBlade==='function') smoothBlade(uvHits);
-          hapticPulse('right', 0.08, 20); // 均し: 弱い持続
+          hapticPulse(0.08, 20); // 均し: 弱い持続
         } else {
           /* 塗りモード */
           if (trowelMortar<=0) { lastCenterUV=null; return; }
           if (typeof paintBlade==='function') paintBlade(uvHits);
-          hapticPulse('right', 0.13, 20); // 塗り: 微弱な持続
+          hapticPulse(0.13, 20); // 塗り: 微弱な持続
           if (++this.covCount>=10) { this.covCount=0; if (typeof updateCoverage==='function') updateCoverage(); }
         }
       }
@@ -190,7 +190,7 @@
   </style>
 </head>
 <body>
-  <div id="version">v2.0</div>
+  <div id="version">v2.1</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
     🅐 壁を設置<br>
@@ -257,6 +257,17 @@
              material="roughness:0.9; metalness:0; opacity:0; transparent:true;"></a-box>
     </a-entity>
 
+    <!-- ===== 操作説明パネル (右手側) ===== -->
+    <a-entity position="0.95 1.65 -0.60" rotation="0 -30 0">
+      <a-plane width="0.72" height="0.62" color="#000" opacity="0.68"></a-plane>
+      <a-text value="操作方法"            position="0  0.26 0.01" align="center" color="#fff"    width="1.6" font="https://cdn.aframe.io/fonts/mozillavr.fnt"></a-text>
+      <a-text value="A      : 壁を設置"   position="0  0.15 0.01" align="center" color="#80EFFF" width="1.5"></a-text>
+      <a-text value="右G    : 均しモード" position="0  0.05 0.01" align="center" color="#FFD080" width="1.5"></a-text>
+      <a-text value="左G    : 鏝板を補充" position="0 -0.05 0.01" align="center" color="#FFD080" width="1.5"></a-text>
+      <a-text value="鏝板へ : すくう"     position="0 -0.15 0.01" align="center" color="#9F9"    width="1.5"></a-text>
+      <a-text value="壁へ   : 塗る"       position="0 -0.25 0.01" align="center" color="#9F9"    width="1.5"></a-text>
+    </a-entity>
+
     <!-- 左手 = 鏝板 -->
     <a-entity id="leftHand"
               laser-controls="hand: left"
@@ -308,12 +319,13 @@
     sceneEl.addEventListener('exit-vr',  ()=>
       UI_IDS.forEach(id=>document.getElementById(id).style.display='block'));
 
-    /* ==================== ハプティクス ==================== */
-    function hapticPulse(handedness, intensity, durationMs) {
-      const session = sceneEl.xrSession;
+    /* ==================== ハプティクス (常に右コン) ==================== */
+    function hapticPulse(intensity, durationMs) {
+      // A-Frame 1.5 では renderer.xr.getSession() でセッションを取得
+      const session = sceneEl.renderer?.xr?.getSession?.();
       if (!session || !session.inputSources) return;
       for (const src of session.inputSources) {
-        if (src.handedness !== handedness) continue;
+        if (src.handedness !== 'right') continue; // 右コン固定
         const acts = src.gamepad?.hapticActuators;
         if (acts && acts.length > 0) acts[0].pulse(intensity, durationMs);
       }
@@ -336,7 +348,7 @@
       if (!mesh) return;
       heightMap = new THREE.CanvasTexture(heightCanvas);
       mesh.material.displacementMap   = heightMap;
-      mesh.material.displacementScale = 0.015; // 最大 15mm の凸凹
+      mesh.material.displacementScale = 0.04;  // 最大 40mm の凸凹 (わかりやすく強め)
       mesh.material.displacementBias  = 0;
       mesh.material.needsUpdate       = true;
     });
@@ -351,8 +363,8 @@
       for (const uv of uvHits) {
         const cx = uv.x * HW, cy = (1-uv.y) * HH;
         const g = hCtx.createRadialGradient(cx,cy,0,cx,cy,r);
-        g.addColorStop(0,   'rgba(255,255,255,0.22)');
-        g.addColorStop(0.6, 'rgba(255,255,255,0.10)');
+        g.addColorStop(0,   'rgba(255,255,255,0.55)');
+        g.addColorStop(0.6, 'rgba(255,255,255,0.28)');
         g.addColorStop(1,   'rgba(255,255,255,0)');
         hCtx.fillStyle = g;
         hCtx.beginPath(); hCtx.arc(cx,cy,r,0,Math.PI*2); hCtx.fill();
