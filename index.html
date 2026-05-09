@@ -190,7 +190,7 @@
   </style>
 </head>
 <body>
-  <div id="version">v2.1</div>
+  <div id="version">v2.2</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
     🅐 壁を設置<br>
@@ -458,6 +458,54 @@
         .setAttribute('value',`鏝の泥 ${makeBar(trowelMortar,TROWEL_MAX)} ${Math.floor(trowelMortar/TROWEL_MAX*100)}%`);
     }
 
+    /* ==================== 鏝波 (Kote-Nami) ====================
+       ストローク方向に沿って並行な暗線・明線を描く
+       type: 'paint' → 細かくくっきり / 'smooth' → 広く浅い      */
+    function drawKoteNami(mid, halfBlade, bladeAngle, strokeW, intensity, type) {
+      const isPaint  = type === 'paint';
+      const spacing  = isPaint ? 7  : 15;   // 線の間隔 (px)
+      const waveAmp  = isPaint ? 2.8 : 1.2; // 線の揺れ幅 (px)
+      const waveFreq = isPaint ? 0.06 : 0.03;
+      const lineW    = isPaint ? 1.4 : 0.9;
+      const numLines = Math.ceil((strokeW * 2) / spacing) + 1;
+      const bladeLen = halfBlade * 2;
+      const STEPS    = Math.max(20, Math.ceil(bladeLen / 5));
+
+      ctx.save();
+      ctx.translate(mid.x, mid.y);
+      ctx.rotate(bladeAngle);
+
+      for (let i = -Math.floor(numLines / 2); i <= Math.floor(numLines / 2); i++) {
+        const yOff = i * spacing;
+        const falloff = 1 - Math.abs(yOff) / (strokeW * 1.15);
+        if (falloff <= 0) continue;
+
+        const baseAlpha = (isPaint ? 0.32 : 0.16) * falloff * Math.min(1, intensity);
+
+        // 偶数線 = 暗い谷 / 奇数線 = 明るい山
+        const isDark = (i % 2 === 0);
+        const r = isDark ? 55  : 175;
+        const g = isDark ? 52  : 170;
+        const b = isDark ? 46  : 162;
+
+        ctx.strokeStyle = `rgba(${r},${g},${b},${baseAlpha.toFixed(3)})`;
+        ctx.lineWidth   = lineW;
+        ctx.beginPath();
+
+        for (let s = 0; s <= STEPS; s++) {
+          const x    = -halfBlade + s * (bladeLen / STEPS);
+          // サイン波で自然なゆらぎ
+          const wave = Math.sin(x * waveFreq + i * 1.1) * waveAmp
+                     + Math.sin(x * waveFreq * 2.3 + i * 0.7) * waveAmp * 0.35;
+          const y    = yOff + wave;
+          if (s === 0) ctx.moveTo(x, y);
+          else         ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     /* ==================== paintBlade ==================== */
     let lastCenterUV = null;
 
@@ -530,6 +578,10 @@
         ctx.beginPath(); ctx.ellipse(0,0,halfBlade*0.65,strokeW*0.65,0,0,Math.PI*2); ctx.stroke();
         ctx.restore();
       }
+
+      /* 鏝波: 塗り (くっきり) */
+      drawKoteNami(mid, halfBlade, bladeAngle, strokeW, intensity, 'paint');
+
       markTextureDirty();
 
       // ハイトマップにも盛り上がりを追加
@@ -543,14 +595,26 @@
     /* ==================== smoothBlade ==================== */
     function smoothBlade(uvHits) {
       if (uvHits.length < 2) return;
-      const pts = uvHits.map(uv=>({x:uv.x*W, y:(1-uv.y)*H}));
-      const mid  = pts[Math.floor(pts.length/2)];
+      const pts  = uvHits.map(uv=>({x:uv.x*W, y:(1-uv.y)*H}));
+      const first = pts[0], last = pts[pts.length-1];
+      const mid   = pts[Math.floor(pts.length/2)];
+      const midUV = uvHits[Math.floor(uvHits.length/2)];
 
-      // カラーCanvas: 薄いベースグレーを重ねて均し感
+      const bdx = last.x-first.x, bdy = last.y-first.y;
+      const bladeLen   = Math.sqrt(bdx*bdx+bdy*bdy);
+      const bladeAngle = Math.atan2(bdy, bdx);
+      const halfBlade  = bladeLen / 2;
+      const strokeW    = 36;
+
+      // カラーCanvas: 薄いベースグレーで均し感
       ctx.fillStyle='rgba(185,180,172,0.06)';
       for (const pt of pts) {
         ctx.beginPath(); ctx.arc(pt.x,pt.y,40,0,Math.PI*2); ctx.fill();
       }
+
+      /* 鏝波: 均し (浅く広い) */
+      drawKoteNami(mid, halfBlade, bladeAngle, strokeW, 1.0, 'smooth');
+
       markTextureDirty();
 
       // ハイトマップ: 黒を重ねて盛り上がりを削る
