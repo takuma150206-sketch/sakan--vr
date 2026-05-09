@@ -10,7 +10,34 @@
      コンポーネント登録 (a-scene より前)
   ============================================================ */
 
-  /* ---------- 刃の形状 ---------- */
+  /* ---------- 左手 laser-controls の haptic を無効化 ---------- */
+  AFRAME.registerComponent('laser-controls-haptic-override', {
+    init: function () {
+      /* 左手コントローラーの gamepad hapticActuators を空配列で上書き */
+      const leftEl = document.getElementById('leftHand');
+      if (!leftEl) return;
+      const patch = () => {
+        try {
+          const sess = document.querySelector('a-scene')?.renderer?.xr?.getSession?.();
+          if (!sess?.inputSources) return;
+          for (const src of sess.inputSources) {
+            if (src.handedness === 'left' && src.gamepad) {
+              /* pulse を空関数に差し替えて振動を抑制 */
+              if (src.gamepad.hapticActuators?.length > 0) {
+                src.gamepad.hapticActuators.forEach(act => {
+                  act._origPulse = act._origPulse || act.pulse.bind(act);
+                  act.pulse = () => Promise.resolve(false);
+                });
+              }
+            }
+          }
+        } catch(e) {}
+      };
+      document.querySelector('a-scene').addEventListener('enter-vr', () => {
+        setTimeout(patch, 500);
+      });
+    }
+  });
   AFRAME.registerComponent('blade-shape', {
     init: function () {
       const hw=0.042, RECT=0.200, TOTAL=0.240, D=0.0025;
@@ -202,6 +229,21 @@
       const isXR=sceneEl.is('vr-mode')||sceneEl.is('ar-mode');
       const obj=this.el.object3D; if(!obj) return;
 
+      /* 右コントローラーの gamepad を毎フレームキャッシュ */
+      if (isXR) {
+        try {
+          const sess = sceneEl.renderer?.xr?.getSession?.();
+          if (sess?.inputSources) {
+            for (const src of sess.inputSources) {
+              if (src.handedness === 'right' && src.gamepad?.hapticActuators?.length > 0) {
+                window._rightGamepad = src.gamepad;
+                break;
+              }
+            }
+          }
+        } catch(e) {}
+      }
+
       /* コントローラー速度を計算 */
       const curPos=new THREE.Vector3();
       obj.getWorldPosition(curPos);
@@ -354,7 +396,7 @@
   </style>
 </head>
 <body>
-  <div id="version">v3.1</div>
+  <div id="version">v3.2</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
     鏝板に鏝を近づけ<strong>手首をひねる</strong> → コテ返し<br>
@@ -425,10 +467,13 @@
              material="roughness:0.9;metalness:0;opacity:0;transparent:true;"></a-box>
     </a-entity>
 
-    <!-- 左手 = 鏝板 -->
+    <!-- 左手 = 鏝板 (haptic無効) -->
     <a-entity id="leftHand"
               laser-controls="hand:left"
-              raycaster="objects:#resetBtn,#gradeBtn; far:3; lineColor:#fff; lineOpacity:0.4">
+              raycaster="objects:#resetBtn,#gradeBtn; far:3; lineColor:#fff; lineOpacity:0.4"
+              tracked-controls="autoHide:false">
+      <!-- laser-controls の内部 haptic を上書き無効化 -->
+      <a-entity laser-controls-haptic-override></a-entity>
       <a-box position="0 0.005 -0.15" width="0.30" height="0.007" depth="0.30"
              color="#A08860" material="roughness:0.85;"></a-box>
       <a-cylinder position="0 -0.065 -0.15" radius="0.016" height="0.12"
@@ -560,14 +605,24 @@
     else el.setAttribute('value',`検出: 壁 ${wallCount} 面`);
   }
 
-  /* ==================== ハプティクス ==================== */
+  /* ==================== ハプティクス (右コン固定) ====================
+     trowel tick で毎フレームキャッシュした _rightGamepad を使う        */
+  window._rightGamepad = null;
+
   function hapticPulse(intensity, durationMs) {
     try {
-      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-      for (const gp of gamepads) {
-        if (!gp) continue;
-        if (gp.id?.toLowerCase().includes('right') && gp.hapticActuators?.length>0) {
-          gp.hapticActuators[0].pulse(intensity, durationMs); return;
+      /* キャッシュ済みの右コン gamepad を優先使用 */
+      if (window._rightGamepad?.hapticActuators?.length > 0) {
+        window._rightGamepad.hapticActuators[0].pulse(intensity, durationMs);
+        return;
+      }
+      /* フォールバック: XR inputSources から直接取得 */
+      const sess = document.querySelector('a-scene')?.renderer?.xr?.getSession?.();
+      if (!sess?.inputSources) return;
+      for (const src of sess.inputSources) {
+        if (src.handedness === 'right' && src.gamepad?.hapticActuators?.length > 0) {
+          src.gamepad.hapticActuators[0].pulse(intensity, durationMs);
+          return;
         }
       }
     } catch(e) {}
