@@ -5,185 +5,280 @@
   <title>左官MR練習プロトタイプ</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
-
   <script>
-    /* ============================================================
-       コンポーネント登録 (a-scene より前)
-    ============================================================ */
+  /* ============================================================
+     コンポーネント登録 (a-scene より前)
+  ============================================================ */
 
-    /* ---------- 刃の形状 (五角形) ---------- */
-    AFRAME.registerComponent('blade-shape', {
-      init: function () {
-        const hw=0.042, RECT=0.200, TOTAL=0.240, D=0.0025;
-        const bot=-TOTAL/2, rTop=bot+RECT, tip=bot+TOTAL;
-        const shape = new THREE.Shape();
-        shape.moveTo(-hw,bot); shape.lineTo(hw,bot);
-        shape.lineTo(hw,rTop); shape.lineTo(0,tip);
-        shape.lineTo(-hw,rTop); shape.closePath();
-        const geo = new THREE.ExtrudeGeometry(shape,{depth:D,bevelEnabled:false});
-        geo.translate(0,0,-D/2);
-        this.el.setObject3D('mesh', new THREE.Mesh(geo,
-          new THREE.MeshStandardMaterial({
-            color:0xc4c6ca, metalness:0.90, roughness:0.14, side:THREE.DoubleSide
-          })
-        ));
+  /* ---------- 刃の形状 ---------- */
+  AFRAME.registerComponent('blade-shape', {
+    init: function () {
+      const hw=0.042, RECT=0.200, TOTAL=0.240, D=0.0025;
+      const bot=-TOTAL/2, rTop=bot+RECT, tip=bot+TOTAL;
+      const shape = new THREE.Shape();
+      shape.moveTo(-hw,bot); shape.lineTo(hw,bot);
+      shape.lineTo(hw,rTop); shape.lineTo(0,tip);
+      shape.lineTo(-hw,rTop); shape.closePath();
+      const geo = new THREE.ExtrudeGeometry(shape,{depth:D,bevelEnabled:false});
+      geo.translate(0,0,-D/2);
+      this.el.setObject3D('mesh', new THREE.Mesh(geo,
+        new THREE.MeshStandardMaterial({color:0xc4c6ca,metalness:0.90,roughness:0.14,side:THREE.DoubleSide})
+      ));
+    }
+  });
+
+  /* ---------- 部屋スキャン ---------- */
+  AFRAME.registerComponent('room-scanner', {
+    init: function () {
+      this.xrPlanes  = new Map(); // XRPlane → wallRegistry エントリ
+      this.curFrame  = null;
+
+      /* Three.js の onBeforeRender で XR フレームをキャプチャ */
+      const sentinel = new THREE.Object3D();
+      sentinel.onBeforeRender = (renderer) => {
+        try { this.curFrame = renderer.xr.getFrame(); } catch(e) {}
+      };
+      this.el.sceneEl.object3D.add(sentinel);
+
+      this.el.sceneEl.addEventListener('exit-vr', () => {
+        for (const [plane] of this.xrPlanes) this._remove(plane);
+        if (typeof updateScanStatus === 'function') updateScanStatus(false, 0);
+      });
+    },
+
+    tick: function () {
+      const session = this.el.sceneEl.renderer?.xr?.getSession?.();
+      if (!session?.detectedPlanes || !this.curFrame) return;
+      const refSpace = this.el.sceneEl.renderer.xr.getReferenceSpace();
+      try {
+        for (const plane of session.detectedPlanes) {
+          const pose = this.curFrame.getPose(plane.planeSpace, refSpace);
+          if (!pose) continue;
+          if (!this.xrPlanes.has(plane)) this._add(plane, pose);
+          else                           this._update(plane, pose);
+        }
+        for (const [plane] of this.xrPlanes)
+          if (!session.detectedPlanes.has(plane)) this._remove(plane);
+
+        if (typeof updateScanStatus === 'function')
+          updateScanStatus(true, wallRegistry.filter(e=>e.id!=='static').length);
+      } catch(e) {}
+    },
+
+    /* ポーズ行列を計算 (XRPlane→Three.js 変換) */
+    _poseMatrix: function (pose) {
+      const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+      /* ShapeGeometry は XY 平面。XRPlane の polygon は planeSpace の XZ 平面
+         (Y が法線)。+90° X 回転で XY→XZ 整合 */
+      return m.multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+    },
+
+    _add: function (plane, pose) {
+      const label    = plane.semanticLabel || 'unknown';
+      const isWall   = plane.orientation === 'vertical' && (label==='wall'||label==='unknown');
+      const isDoor   = label === 'door';
+      const isWindow = label === 'window';
+
+      /* ポリゴンからジオメトリを作成 */
+      const poly  = plane.polygon;
+      const shape = new THREE.Shape(poly.map(p => new THREE.Vector2(p.x, p.z)));
+      const geo   = new THREE.ShapeGeometry(shape);
+
+      let mat, entry = null;
+      if (isWall) {
+        const painter = createPainter(512, 512);
+        mat = new THREE.MeshStandardMaterial({
+          map: painter.colorTex,
+          displacementMap: painter.heightTex,
+          displacementScale: 0.04,
+          roughness: 0.95, transparent: true, opacity: 0.88,
+          side: THREE.DoubleSide
+        });
+        entry = { mesh: null, painter, id: `detected-${Date.now()}-${Math.random()}` };
+        wallRegistry.push(entry);
+      } else if (isDoor) {
+        mat = new THREE.MeshBasicMaterial({color:0xff3333, wireframe:true, transparent:true, opacity:0.65});
+      } else if (isWindow) {
+        mat = new THREE.MeshBasicMaterial({color:0x3399ff, wireframe:true, transparent:true, opacity:0.55});
+      } else {
+        mat = new THREE.MeshBasicMaterial({color:0x888888, transparent:true, opacity:0.08, side:THREE.DoubleSide});
       }
-    });
 
-    /* ---------- 鏝コンポーネント ---------- */
-    AFRAME.registerComponent('trowel', {
-      init: function () {
-        this.lastTick    = 0;
-        this.covCount    = 0;
-        this.smoothing   = false;
-        this.wasContact  = false;
-        this._lastMid       = null;
-        this._lastHalfBlade = 0;
-        this._lastAngle     = 0;
-        this.mouseDown   = false;
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(this._poseMatrix(pose));
+      this.el.sceneEl.object3D.add(mesh);
 
-        this.threeRC     = new THREE.Raycaster();
-        this.threeRC.far = 0.08;
+      if (entry) entry.mesh = mesh;
+      this.xrPlanes.set(plane, { mesh, entry, label });
+    },
 
-        /* 刃サンプル点 (長方形200mm) */
-        const Y_BOT=-0.085, Y_TOP=+0.115, BZ=-0.042;
-        this.bladeLocalPts = [];
-        for (let i=0; i<9; i++) {
-          const t=i/8;
-          this.bladeLocalPts.push(new THREE.Vector3(0, Y_BOT+t*(Y_TOP-Y_BOT), BZ));
-        }
-        this._worldPt     = new THREE.Vector3();
-        this._fwd         = new THREE.Vector3();
-        this._tmpPos      = new THREE.Vector3();
-        this._hawkPos     = new THREE.Vector3();
-        this._bladeCenter = new THREE.Vector3();
+    _update: function (plane, pose) {
+      const data = this.xrPlanes.get(plane);
+      if (data?.mesh) data.mesh.matrix.copy(this._poseMatrix(pose));
+    },
 
-        /* ---- 右グリップ: 均しモード ---- */
-        this.el.addEventListener('gripdown', () => {
-          this.smoothing = true;
-          if (typeof setMessage==='function') setMessage('均しモード ON 🪣');
+    _remove: function (plane) {
+      const data = this.xrPlanes.get(plane);
+      if (data?.mesh) {
+        this.el.sceneEl.object3D.remove(data.mesh);
+        data.mesh.geometry.dispose();
+        data.mesh.material.dispose();
+      }
+      if (data?.entry) {
+        const idx = wallRegistry.findIndex(e => e === data.entry);
+        if (idx >= 0) wallRegistry.splice(idx, 1);
+      }
+      this.xrPlanes.delete(plane);
+    }
+  });
+
+  /* ---------- 鏝コンポーネント ---------- */
+  AFRAME.registerComponent('trowel', {
+    init: function () {
+      this.lastTick       = 0;
+      this.covCount       = 0;
+      this.smoothing      = false;
+      this.wasContact     = false;
+      this._lastMid       = null;
+      this._lastHalfBlade = 0;
+      this._lastAngle     = 0;
+      this.mouseDown      = false;
+
+      this.threeRC     = new THREE.Raycaster();
+      this.threeRC.far = 0.08;
+
+      const Y_BOT=-0.085, Y_TOP=+0.115, BZ=-0.042;
+      this.bladeLocalPts = [];
+      for (let i=0; i<9; i++) {
+        const t=i/8;
+        this.bladeLocalPts.push(new THREE.Vector3(0, Y_BOT+t*(Y_TOP-Y_BOT), BZ));
+      }
+      this._worldPt     = new THREE.Vector3();
+      this._fwd         = new THREE.Vector3();
+      this._tmpPos      = new THREE.Vector3();
+      this._hawkPos     = new THREE.Vector3();
+      this._bladeCenter = new THREE.Vector3();
+
+      this.el.addEventListener('gripdown', () => {
+        this.smoothing=true;
+        if(typeof setMessage==='function') setMessage('均しモード ON');
+      });
+      this.el.addEventListener('gripup', () => {
+        this.smoothing=false;
+        if(typeof setMessage==='function') setMessage('');
+      });
+      this.el.addEventListener('abuttondown', () => {
+        const obj=this.el.object3D; if(!obj) return;
+        obj.getWorldPosition(this._tmpPos);
+        document.getElementById('wall').setAttribute('position', {
+          x: parseFloat(this._tmpPos.x.toFixed(3)), y: 1.3,
+          z: parseFloat((this._tmpPos.z-0.042).toFixed(3))
         });
-        this.el.addEventListener('gripup', () => {
-          this.smoothing = false;
-          if (typeof setMessage==='function') setMessage('');
-        });
+        if(typeof resetPainter==='function') resetPainter(staticPainter);
+        if(typeof setMessage==='function') setMessage('壁を設置しました ✓');
+      });
+      document.getElementById('leftHand').addEventListener('gripdown', () => {
+        hawkMortar=100;
+        if(typeof updateMortarVisuals==='function') updateMortarVisuals();
+        if(typeof setMessage==='function') setMessage('鏝板を補充しました 🪣');
+      });
+      window.addEventListener('mousedown', ()=>{ this.mouseDown=true; });
+      window.addEventListener('mouseup',   ()=>{ this.mouseDown=false; });
+    },
 
-        /* ---- Ⓐボタン: 壁設置 ---- */
-        this.el.addEventListener('abuttondown', () => {
-          const obj=this.el.object3D; if(!obj) return;
-          obj.getWorldPosition(this._tmpPos);
-          document.getElementById('wall').setAttribute('position', {
-            x: parseFloat(this._tmpPos.x.toFixed(3)),
-            y: 1.3,
-            z: parseFloat((this._tmpPos.z-0.042).toFixed(3))
-          });
-          if (typeof resetWallCanvas==='function') resetWallCanvas();
-          if (typeof setMessage==='function') setMessage('壁を設置しました ✓');
-        });
+    tick: function () {
+      const now=performance.now();
+      if(now-this.lastTick<16) return;
+      this.lastTick=now;
 
-        /* ---- 左グリップ: 鏝板に補充 ---- */
-        document.getElementById('leftHand').addEventListener('gripdown', () => {
-          hawkMortar=100;
-          if (typeof updateMortarVisuals==='function') updateMortarVisuals();
-          if (typeof setMessage==='function') setMessage('鏝板を補充しました 🪣');
-        });
+      const sceneEl=document.querySelector('a-scene');
+      const isXR=sceneEl.is('vr-mode')||sceneEl.is('ar-mode');
+      const obj=this.el.object3D; if(!obj) return;
 
-        /* ---- PC フォールバック ---- */
-        window.addEventListener('mousedown', ()=>{ this.mouseDown=true; });
-        window.addEventListener('mouseup',   ()=>{ this.mouseDown=false; });
-      },
-
-      tick: function () {
-        const now=performance.now();
-        if (now-this.lastTick<16) return;
-        this.lastTick=now;
-
-        const sceneEl = document.querySelector('a-scene');
-        const isXR    = sceneEl.is('vr-mode')||sceneEl.is('ar-mode');
-        const obj     = this.el.object3D;
-        if (!obj) return;
-
-        /* ==== すくい (近づくだけで自動) ==== */
-        const leftEl=document.getElementById('leftHand');
-        if (leftEl&&leftEl.object3D) {
-          this._hawkPos.set(0,0.012,-0.15).applyMatrix4(leftEl.object3D.matrixWorld);
-          this._bladeCenter.set(0,0.015,-0.042).applyMatrix4(obj.matrixWorld);
-          const dist=this._bladeCenter.distanceTo(this._hawkPos);
-          if (dist<SCOOP_DIST && hawkMortar>0 && trowelMortar<TROWEL_MAX) {
-            const amt=Math.min(SCOOP_RATE, hawkMortar, TROWEL_MAX-trowelMortar);
-            hawkMortar  =Math.max(0, hawkMortar  -amt);
-            trowelMortar=Math.min(TROWEL_MAX, trowelMortar+amt);
-            if (typeof updateMortarVisuals==='function') updateMortarVisuals();
-            /* すくいハプティクス */
-            hapticPulse(0.30, 80);
-          }
-        }
-
-        if (!isXR && !this.mouseDown) { lastCenterUV=null; this.wasContact=false; return; }
-
-        /* ==== 壁へのレイキャスト ==== */
-        this._fwd.set(0,0,-1).transformDirection(obj.matrixWorld);
-        const wallEl=document.getElementById('wall');
-        if (!wallEl) return;
-        const wallMesh=wallEl.getObject3D('mesh');
-        if (!wallMesh) return;
-
-        const uvHits=[];
-        for (const lp of this.bladeLocalPts) {
-          this._worldPt.copy(lp).applyMatrix4(obj.matrixWorld);
-          this.threeRC.set(this._worldPt, this._fwd);
-          const hits=this.threeRC.intersectObject(wallMesh,true);
-          if (hits.length>0&&hits[0].uv)
-            uvHits.push({x:hits[0].uv.x, y:hits[0].uv.y});
-        }
-
-        if (uvHits.length < 2) {
-          /* 壁から離れた瞬間 → 終端の弧 */
-          if (this.wasContact && this._lastMid && typeof drawStrokeEdge === 'function') {
-            drawStrokeEdge(this._lastMid, this._lastHalfBlade, this._lastAngle, false);
-            markTextureDirty();
-          }
-          lastCenterUV = null; this.wasContact = false; return;
-        }
-
-        /* 壁接触ハプティクス */
-        if (!this.wasContact) {
-          hapticPulse(0.65, 55);
-
-          /* 始端の弧 */
-          if (uvHits.length >= 2 && typeof drawStrokeEdge === 'function') {
-            const pts2    = uvHits.map(uv => ({ x: uv.x * W, y: (1 - uv.y) * H }));
-            const first2  = pts2[0], last2 = pts2[pts2.length - 1];
-            const midPt2  = pts2[Math.floor(pts2.length / 2)];
-            const dx2 = last2.x - first2.x, dy2 = last2.y - first2.y;
-            const hb2 = Math.sqrt(dx2*dx2 + dy2*dy2) / 2;
-            drawStrokeEdge(midPt2, hb2, Math.atan2(dy2, dx2), true);
-            markTextureDirty();
-          }
-          this.wasContact = true;
-        }
-
-        if (this.smoothing) {
-          if (typeof smoothBlade==='function') smoothBlade(uvHits);
-          hapticPulse(0.08, 20);
-        } else {
-          if (trowelMortar<=0) { lastCenterUV=null; return; }
-          /* 終端弧のために前フレームの情報を保存 */
-          const ptsT   = uvHits.map(uv => ({ x: uv.x * W, y: (1 - uv.y) * H }));
-          const firstT = ptsT[0], lastT = ptsT[ptsT.length - 1];
-          const dxT = lastT.x - firstT.x, dyT = lastT.y - firstT.y;
-          this._lastMid      = ptsT[Math.floor(ptsT.length / 2)];
-          this._lastHalfBlade = Math.sqrt(dxT*dxT + dyT*dyT) / 2;
-          this._lastAngle    = Math.atan2(dyT, dxT);
-
-          if (typeof paintBlade==='function') paintBlade(uvHits);
-          hapticPulse(0.13, 20);
-          if (++this.covCount>=10) { this.covCount=0; if (typeof updateCoverage==='function') updateCoverage(); }
+      /* すくい */
+      const leftEl=document.getElementById('leftHand');
+      if(leftEl?.object3D) {
+        this._hawkPos.set(0,0.012,-0.15).applyMatrix4(leftEl.object3D.matrixWorld);
+        this._bladeCenter.set(0,0.015,-0.042).applyMatrix4(obj.matrixWorld);
+        const dist=this._bladeCenter.distanceTo(this._hawkPos);
+        if(dist<SCOOP_DIST&&hawkMortar>0&&trowelMortar<TROWEL_MAX) {
+          const amt=Math.min(SCOOP_RATE,hawkMortar,TROWEL_MAX-trowelMortar);
+          hawkMortar=Math.max(0,hawkMortar-amt);
+          trowelMortar=Math.min(TROWEL_MAX,trowelMortar+amt);
+          if(typeof updateMortarVisuals==='function') updateMortarVisuals();
+          hapticPulse(0.30,80);
         }
       }
-    });
+
+      if(!isXR&&!this.mouseDown) { lastCenterUV=null; this.wasContact=false; return; }
+
+      this._fwd.set(0,0,-1).transformDirection(obj.matrixWorld);
+
+      /* 全登録壁からレイキャスト → 最初にヒットした壁のペインターを使う */
+      const centerPt = this.bladeLocalPts[4];
+      this._worldPt.copy(centerPt).applyMatrix4(obj.matrixWorld);
+      this.threeRC.set(this._worldPt, this._fwd);
+      this.threeRC.far = 0.08;
+
+      let hitEntry = null;
+      for (const entry of wallRegistry) {
+        if (!entry.mesh) continue;
+        const hits = this.threeRC.intersectObject(entry.mesh, true);
+        if (hits.length > 0) { hitEntry = entry; break; }
+      }
+
+      if (!hitEntry) {
+        if(this.wasContact&&this._lastMid&&typeof drawStrokeEdge==='function') {
+          drawStrokeEdge(this._lastMid, this._lastHalfBlade, this._lastAngle, false,
+                         this.wasContact ? this._lastPainter?.colorCtx : null);
+          if(this._lastPainter) this._lastPainter.colorTex.needsUpdate=true;
+        }
+        lastCenterUV=null; this.wasContact=false; return;
+      }
+
+      /* 刃の全点をヒットした壁に対してキャスト */
+      const uvHits=[];
+      for(const lp of this.bladeLocalPts) {
+        this._worldPt.copy(lp).applyMatrix4(obj.matrixWorld);
+        this.threeRC.set(this._worldPt, this._fwd);
+        const hits=this.threeRC.intersectObject(hitEntry.mesh, true);
+        if(hits.length>0&&hits[0].uv) uvHits.push({x:hits[0].uv.x, y:hits[0].uv.y});
+      }
+      if(uvHits.length<2) { lastCenterUV=null; this.wasContact=false; return; }
+
+      if(!this.wasContact) {
+        hapticPulse(0.65,55);
+        const pts2=uvHits.map(uv=>({x:uv.x*hitEntry.painter.W, y:(1-uv.y)*hitEntry.painter.H}));
+        const f2=pts2[0], l2=pts2[pts2.length-1];
+        const dx2=l2.x-f2.x, dy2=l2.y-f2.y;
+        const hb2=Math.sqrt(dx2*dx2+dy2*dy2)/2;
+        if(typeof drawStrokeEdge==='function')
+          drawStrokeEdge(pts2[Math.floor(pts2.length/2)], hb2, Math.atan2(dy2,dx2), true, hitEntry.painter.colorCtx);
+        if(hitEntry.painter) hitEntry.painter.colorTex.needsUpdate=true;
+        this.wasContact=true;
+      }
+
+      const painter=hitEntry.painter;
+      if(this.smoothing) {
+        if(typeof smoothSurface==='function') smoothSurface(painter, uvHits);
+        hapticPulse(0.08,20);
+      } else {
+        if(trowelMortar<=0) { lastCenterUV=null; return; }
+        const pts3=uvHits.map(uv=>({x:uv.x*painter.W, y:(1-uv.y)*painter.H}));
+        const f3=pts3[0], l3=pts3[pts3.length-1];
+        const dx3=l3.x-f3.x, dy3=l3.y-f3.y;
+        this._lastMid       = pts3[Math.floor(pts3.length/2)];
+        this._lastHalfBlade = Math.sqrt(dx3*dx3+dy3*dy3)/2;
+        this._lastAngle     = Math.atan2(dy3,dx3);
+        this._lastPainter   = painter;
+        if(typeof paintSurface==='function') paintSurface(painter, uvHits);
+        hapticPulse(0.13,20);
+        if(++this.covCount>=10) { this.covCount=0; if(typeof updateCoverage==='function') updateCoverage(painter); }
+      }
+    }
+  });
   </script>
-
   <style>
     body { margin:0; font-family:-apple-system,"Hiragino Sans",sans-serif; }
     #info {
@@ -206,7 +301,7 @@
       box-shadow:0 4px 12px rgba(0,0,0,0.3);
     }
     #enterAR:hover:not(:disabled){background:#777;}
-    #enterAR:disabled{background:#444; cursor:not-allowed;}
+    #enterAR:disabled{background:#444;cursor:not-allowed;}
     #status {
       position:fixed; bottom:24px; left:24px;
       background:rgba(0,0,0,0.7); color:#fff;
@@ -215,89 +310,87 @@
   </style>
 </head>
 <body>
-  <div id="version">v2.9</div>
+  <div id="version">v3.0</div>
   <div id="info">
     <strong>左官MR練習プロトタイプ</strong><br>
-    🅐 壁を設置<br>
-    左グリップ 鏝板に補充<br>
-    鏝板に刃を近づける → すくう<br>
-    壁に近づける → 塗る (泥が必要)<br>
-    右グリップを握りながら → 均す<br>
-    左手で「採点」「リセット」
+    Enter AR → Quest 3 が部屋を自動認識<br>
+    検出した壁に直接塗れる<br>
+    ドア=赤 / 窓=青 で障害物表示<br>
+    🅐 静的壁を手元に設置 (フォールバック)
   </div>
   <button id="enterAR" disabled>確認中...</button>
-  <div id="status">WebXR 対応を確認中...</div>
+  <div id="status">WebXR 確認中...</div>
 
   <a-scene
     background="transparent: true"
     vr-mode-ui="enabled: false"
-    webxr="optionalFeatures: hit-test, local-floor, anchors, plane-detection;"
+    webxr="optionalFeatures: hit-test, local-floor, anchors, plane-detection, mesh-detection;"
     renderer="colorManagement: true; antialias: true; alpha: true;">
 
     <a-assets>
-      <canvas id="wallCanvas"   width="1024" height="800"></canvas>
-      <!-- ハイトマップ用 Canvas (低解像度で十分) -->
-      <canvas id="heightCanvas" width="256"  height="200"></canvas>
-      <canvas id="opsCanvas" width="512" height="512"></canvas>
+      <canvas id="wallCanvas"   width="512" height="512"></canvas>
+      <canvas id="heightCanvas" width="128" height="128"></canvas>
+      <canvas id="opsCanvas"    width="512" height="512"></canvas>
     </a-assets>
 
-    <!--
-      壁: 64×64 サブディビジョン → displacementMap で頂点が盛り上がる
-      geometry コンポーネントで segmentsWidth / segmentsHeight を指定
-    -->
+    <!-- 空間スキャナ -->
+    <a-entity room-scanner></a-entity>
+
+    <!-- 静的フォールバック壁 (検出壁が0のときの練習用) -->
     <a-entity id="wall"
-      geometry="primitive: plane; width: 1.2; height: 1.0; segmentsWidth: 64; segmentsHeight: 64"
-      material="src: #wallCanvas; shader: standard; roughness: 0.95; metalness: 0;"
+      geometry="primitive:plane; width:1.2; height:1.0; segmentsWidth:64; segmentsHeight:64"
+      material="src:#wallCanvas; shader:standard; roughness:0.95; metalness:0;"
       position="0 1.3 -0.7">
     </a-entity>
 
     <!-- HUD -->
-    <a-entity position="-0.95 1.85 -0.55" rotation="0 35 0">
-      <a-plane width="0.80" height="0.54" color="#000" opacity="0.68"></a-plane>
-      <a-text value="施工状況"   position="0  0.22 0.01" align="center" color="#fff"    width="1.5"></a-text>
-      <a-text id="hudCoverage"  value="塗布率 ░░░░░░░░  0%"   position="0  0.11 0.01" align="center" color="#9F9"    width="1.4"></a-text>
-      <a-text id="hudHawk"      value="鏝板  ████████ 100%"   position="0  0.00 0.01" align="center" color="#FFD080" width="1.4"></a-text>
-      <a-text id="hudTrowel"    value="鏝の泥 ░░░░░░░░  0%"   position="0 -0.11 0.01" align="center" color="#80DFFF" width="1.4"></a-text>
-      <a-text id="hudMessage"   value=""                       position="0 -0.22 0.01" align="center" color="#FFD700" width="1.3" wrap-count="22"></a-text>
+    <a-entity position="-0.95 1.95 -0.55" rotation="0 35 0">
+      <a-plane width="0.80" height="0.66" color="#000" opacity="0.68"></a-plane>
+      <a-text value="施工状況"   position="0  0.28 0.01" align="center" color="#fff"    width="1.5"></a-text>
+      <a-text id="hudScan"      value="壁スキャン: 待機中" position="0  0.17 0.01" align="center" color="#adf" width="1.4"></a-text>
+      <a-text id="hudCoverage"  value="塗布率 ░░░░░░░░  0%"  position="0  0.06 0.01" align="center" color="#9F9" width="1.4"></a-text>
+      <a-text id="hudHawk"      value="鏝板  ████████ 100%" position="0 -0.05 0.01" align="center" color="#FFD080" width="1.4"></a-text>
+      <a-text id="hudTrowel"    value="鏝の泥 ░░░░░░░░  0%"  position="0 -0.16 0.01" align="center" color="#80DFFF" width="1.4"></a-text>
+      <a-text id="hudMessage"   value=""                     position="0 -0.27 0.01" align="center" color="#FFD700" width="1.3" wrap-count="22"></a-text>
     </a-entity>
 
     <!-- ボタン -->
-    <a-entity position="-0.95 1.38 -0.55" rotation="0 35 0">
+    <a-entity position="-0.95 1.40 -0.55" rotation="0 35 0">
       <a-box id="resetBtn" position="-0.16 0 0" width="0.26" height="0.12" depth="0.04" color="#a44"></a-box>
       <a-text value="リセット" position="-0.16 0 0.03" align="center" color="#fff" width="1.4"></a-text>
       <a-box id="gradeBtn"  position="0.16 0 0"  width="0.26" height="0.12" depth="0.04" color="#4a4"></a-box>
       <a-text value="採点"   position="0.16 0 0.03" align="center" color="#fff" width="1.4"></a-text>
     </a-entity>
 
+    <!-- 操作説明パネル -->
+    <a-plane position="0.95 1.70 -0.60" rotation="0 -30 0"
+             width="0.72" height="0.65"
+             material="src:#opsCanvas; transparent:true; shader:flat;"></a-plane>
+
     <!-- 右手 = 鏝 -->
     <a-entity id="rightHand"
-              oculus-touch-controls="hand: right; model: false"
+              oculus-touch-controls="hand:right; model:false"
               trowel>
       <a-sphere position="0 -0.080 0" radius="0.018" color="#C4A068" material="roughness:0.75;"></a-sphere>
       <a-cylinder position="0 -0.0175 0" radius="0.015" height="0.125" color="#D8BC84" material="roughness:0.70;"></a-cylinder>
-      <a-cylinder position="0 0.045 0" radius="0.013" height="0.008" color="#7A7A7A" material="metalness:0.7; roughness:0.4;"></a-cylinder>
-      <a-cylinder position="0 0 -0.020" radius="0.007" height="0.040" rotation="90 0 0" color="#888888" material="metalness:0.80; roughness:0.28;"></a-cylinder>
+      <a-cylinder position="0 0.045 0"   radius="0.013" height="0.008" color="#7A7A7A" material="metalness:0.7;roughness:0.4;"></a-cylinder>
+      <a-cylinder position="0 0 -0.020"  radius="0.007" height="0.040" rotation="90 0 0" color="#888888" material="metalness:0.80;roughness:0.28;"></a-cylinder>
       <a-entity blade-shape position="0 0.035 -0.042"></a-entity>
       <a-box id="trowelMortarViz" position="0 0.035 -0.046"
              width="0.080" height="0.198" depth="0.006" color="#828278"
-             material="roughness:0.9; metalness:0; opacity:0; transparent:true;"></a-box>
+             material="roughness:0.9;metalness:0;opacity:0;transparent:true;"></a-box>
     </a-entity>
-
-    <!-- ===== 操作説明パネル (Canvas テクスチャ、日本語対応) ===== -->
-    <a-plane position="0.95 1.65 -0.60" rotation="0 -30 0"
-             width="0.72" height="0.62"
-             material="src: #opsCanvas; transparent: true; shader: flat;"></a-plane>
 
     <!-- 左手 = 鏝板 -->
     <a-entity id="leftHand"
-              laser-controls="hand: left"
-              raycaster="objects: #resetBtn, #gradeBtn; far: 3; lineColor: #fff; lineOpacity: 0.4">
+              laser-controls="hand:left"
+              raycaster="objects:#resetBtn,#gradeBtn; far:3; lineColor:#fff; lineOpacity:0.4">
       <a-box position="0 0.005 -0.15" width="0.30" height="0.007" depth="0.30"
              color="#A08860" material="roughness:0.85;"></a-box>
       <a-cylinder position="0 -0.065 -0.15" radius="0.016" height="0.12"
                   color="#6B4226" material="roughness:0.80;"></a-cylinder>
       <a-box position="0 0.010 -0.15" width="0.302" height="0.004" depth="0.302"
-             color="#666" material="metalness:0.6; roughness:0.5;"></a-box>
+             color="#666" material="metalness:0.6;roughness:0.5;"></a-box>
       <a-sphere id="hawkMortarViz" position="0 0.022 -0.15" scale="0.22 0.05 0.22"
                 color="#828278" material="roughness:0.9;"></a-sphere>
     </a-entity>
@@ -308,528 +401,425 @@
   </a-scene>
 
   <script>
-    /* ==================== 操作説明パネル (Canvas テクスチャ) ==================== */
-    (function drawOpsPanel() {
-      const c   = document.getElementById('opsCanvas');
-      const c2d = c.getContext('2d');
-      const CW = c.width, CH = c.height;
+  /* ==================== ペインター生成 ==================== */
+  function createPainter(W, H) {
+    const colorCanvas = document.createElement('canvas');
+    colorCanvas.width=W; colorCanvas.height=H;
+    const colorCtx=colorCanvas.getContext('2d');
+    _fillBase(colorCtx,W,H);
+    const colorTex = new THREE.CanvasTexture(colorCanvas);
 
-      // 背景
-      c2d.fillStyle = 'rgba(0,0,0,0.75)';
-      c2d.roundRect(0, 0, CW, CH, 32);
-      c2d.fill();
+    const HW=Math.floor(W/4), HH=Math.floor(H/4);
+    const heightCanvas=document.createElement('canvas');
+    heightCanvas.width=HW; heightCanvas.height=HH;
+    const hCtx=heightCanvas.getContext('2d');
+    hCtx.fillStyle='#000'; hCtx.fillRect(0,0,HW,HH);
+    const heightTex     = new THREE.CanvasTexture(heightCanvas);
+    const heightData    = new Float32Array(HW*HH);
+    const heightImgData = hCtx.createImageData(HW,HH);
 
-      // タイトル
-      c2d.font = 'bold 46px sans-serif';
-      c2d.fillStyle = '#ffffff';
-      c2d.textAlign = 'center';
-      c2d.fillText('操作方法', CW/2, 72);
+    return {
+      colorCanvas, colorCtx, colorTex, W, H,
+      heightCanvas, hCtx, heightTex, heightData, heightImgData, HW, HH,
+      thicknessMap: new Uint8Array(W*H),
+      lastCenterUV: null
+    };
+  }
 
-      // 区切り線
-      c2d.strokeStyle = 'rgba(255,255,255,0.25)';
-      c2d.lineWidth = 2;
-      c2d.beginPath(); c2d.moveTo(40, 95); c2d.lineTo(CW-40, 95); c2d.stroke();
-
-      // 操作一覧
-      const items = [
-        { label: 'Ⓐ',         desc: '壁を設置',     color: '#80EFFF' },
-        { label: '右グリップ', desc: '均しモード',   color: '#FFD080' },
-        { label: '左グリップ', desc: '鏝板を補充',   color: '#FFD080' },
-        { label: '鏝板に近づく', desc: 'すくう',     color: '#88FF88' },
-        { label: '壁に近づく', desc: '塗る',         color: '#88FF88' },
-        { label: '左手レーザー', desc: '採点/リセット', color: '#dddddd' },
-      ];
-
-      c2d.textAlign = 'left';
-      items.forEach((item, i) => {
-        const y = 152 + i * 64;
-
-        // ラベル (左)
-        c2d.font = 'bold 34px sans-serif';
-        c2d.fillStyle = item.color;
-        c2d.fillText(item.label, 48, y);
-
-        // 区切り
-        c2d.fillStyle = 'rgba(255,255,255,0.4)';
-        c2d.fillText(':', 248, y);
-
-        // 説明 (右)
-        c2d.font = '34px sans-serif';
-        c2d.fillStyle = '#ffffff';
-        c2d.fillText(item.desc, 272, y);
-      });
-    })();
-
-    /* ==================== WebXR ==================== */
-    const statusEl   = document.getElementById('status');
-    const enterARBtn = document.getElementById('enterAR');
-    const sceneEl    = document.querySelector('a-scene');
-    let arSupported  = false;
-
-    async function checkAR() {
-      if (!navigator.xr) { statusEl.textContent='✗ WebXR 非対応'; return; }
-      try {
-        arSupported = await navigator.xr.isSessionSupported('immersive-ar');
-        const vrOK  = await navigator.xr.isSessionSupported('immersive-vr');
-        if (arSupported) {
-          statusEl.textContent='✓ AR (パススルー) 対応';
-          enterARBtn.textContent='Enter AR (MR)'; enterARBtn.disabled=false;
-        } else if (vrOK) {
-          statusEl.textContent='⚠ VR モードで起動';
-          enterARBtn.textContent='Enter VR'; enterARBtn.disabled=false;
-        } else { statusEl.textContent='✗ XR 非対応'; }
-      } catch(e) { statusEl.textContent='エラー: '+e.message; }
+  function _fillBase(ctx, W, H) {
+    ctx.fillStyle='#C8C2B8'; ctx.fillRect(0,0,W,H);
+    for(let i=0;i<Math.floor(W*H*0.004);i++){
+      const x=Math.random()*W, y=Math.random()*H;
+      const v=Math.floor(180+Math.random()*40);
+      ctx.fillStyle=`rgba(${v},${v-2},${v-5},${0.15+Math.random()*0.25})`;
+      ctx.beginPath(); ctx.arc(x,y,Math.random()*1.8+0.3,0,Math.PI*2); ctx.fill();
     }
-    checkAR();
+  }
 
-    const UI_IDS=['enterAR','status','info','version'];
-    enterARBtn.addEventListener('click', ()=>{
-      if (arSupported) sceneEl.enterAR(); else sceneEl.enterVR();
+  function resetPainter(p) {
+    p.thicknessMap=new Uint8Array(p.W*p.H);
+    _fillBase(p.colorCtx,p.W,p.H);
+    p.heightData=new Float32Array(p.HW*p.HH);
+    p.hCtx.fillStyle='#000'; p.hCtx.fillRect(0,0,p.HW,p.HH);
+    p.colorTex.needsUpdate=true;
+    p.heightTex.needsUpdate=true;
+    p.lastCenterUV=null;
+  }
+
+  /* ==================== 静的壁ペインター ==================== */
+  /* ページロード後に Three.js メッシュが存在してから displacementMap をセット */
+  const staticPainter = createPainter(512,512);
+  /* wallCanvas / heightCanvas asset に静的ペインターを接続 */
+  document.getElementById('wallCanvas').getContext('2d')
+    .drawImage(staticPainter.colorCanvas, 0, 0);
+
+  /* wallRegistry: すべての塗り対象壁 */
+  const wallRegistry = [];
+
+  document.querySelector('a-scene').addEventListener('loaded', () => {
+    const wallEl   = document.getElementById('wall');
+    const mesh     = wallEl.getObject3D('mesh');
+    if (!mesh) return;
+
+    /* 静的壁に Canvas テクスチャをセット */
+    const colorTex = new THREE.CanvasTexture(staticPainter.colorCanvas);
+    staticPainter.colorTex = colorTex;
+    mesh.material.map = colorTex;
+
+    const heightTex = new THREE.CanvasTexture(staticPainter.heightCanvas);
+    staticPainter.heightTex = heightTex;
+    mesh.material.displacementMap   = heightTex;
+    mesh.material.displacementScale = 0.04;
+    mesh.material.displacementBias  = 0;
+    mesh.material.needsUpdate = true;
+
+    /* 静的壁を wallRegistry の先頭に追加 */
+    wallRegistry.push({ mesh, painter: staticPainter, id: 'static' });
+  });
+
+  /* ==================== WebXR ==================== */
+  const statusEl   = document.getElementById('status');
+  const enterARBtn = document.getElementById('enterAR');
+  const sceneEl    = document.querySelector('a-scene');
+  let arSupported  = false;
+
+  async function checkAR() {
+    if(!navigator.xr){ statusEl.textContent='✗ WebXR 非対応'; return; }
+    try {
+      arSupported=await navigator.xr.isSessionSupported('immersive-ar');
+      const vrOK=await navigator.xr.isSessionSupported('immersive-vr');
+      if(arSupported){
+        statusEl.textContent='✓ AR + 空間認識 対応';
+        enterARBtn.textContent='Enter AR (部屋スキャン)'; enterARBtn.disabled=false;
+      } else if(vrOK){
+        statusEl.textContent='⚠ VR のみ対応 (空間認識なし)';
+        enterARBtn.textContent='Enter VR'; enterARBtn.disabled=false;
+      } else { statusEl.textContent='✗ XR 非対応'; }
+    } catch(e){ statusEl.textContent='エラー: '+e.message; }
+  }
+  checkAR();
+
+  const UI_IDS=['enterAR','status','info','version'];
+  enterARBtn.addEventListener('click',()=>{ if(arSupported) sceneEl.enterAR(); else sceneEl.enterVR(); });
+  sceneEl.addEventListener('enter-vr',()=> UI_IDS.forEach(id=>document.getElementById(id).style.display='none'));
+  sceneEl.addEventListener('exit-vr', ()=> UI_IDS.forEach(id=>document.getElementById(id).style.display='block'));
+
+  /* ==================== スキャン状態 HUD ==================== */
+  function updateScanStatus(scanning, wallCount) {
+    const el = document.getElementById('hudScan');
+    if (!el) return;
+    if (!scanning) el.setAttribute('value','壁スキャン: 待機中');
+    else if (wallCount === 0) el.setAttribute('value','壁スキャン中... 🔍');
+    else el.setAttribute('value',`検出: 壁 ${wallCount} 面`);
+  }
+
+  /* ==================== ハプティクス ==================== */
+  function hapticPulse(intensity, durationMs) {
+    try {
+      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (const gp of gamepads) {
+        if (!gp) continue;
+        if (gp.id?.toLowerCase().includes('right') && gp.hapticActuators?.length>0) {
+          gp.hapticActuators[0].pulse(intensity, durationMs); return;
+        }
+      }
+    } catch(e) {}
+  }
+
+  /* ==================== モルタルシステム ==================== */
+  let hawkMortar   = 100;
+  let trowelMortar = 0;
+  const TROWEL_MAX=60, SCOOP_RATE=2.5, PAINT_COST=0.35, SCOOP_DIST=0.22;
+  let lastCenterUV = null;
+
+  function makeBar(val,max,len=8){
+    const n=Math.round(Math.max(0,Math.min(val/max,1))*len);
+    return '█'.repeat(n)+'░'.repeat(len-n);
+  }
+  function updateMortarVisuals(){
+    const hViz=document.getElementById('hawkMortarViz');
+    if(hViz){ const hr=Math.max(0.02,hawkMortar/100);
+      hViz.setAttribute('scale',`${hr*0.22} ${hr*0.05} ${hr*0.22}`); }
+    const tViz=document.getElementById('trowelMortarViz');
+    if(tViz){ const tr=trowelMortar/TROWEL_MAX;
+      tViz.setAttribute('material',
+        `color:#828278;roughness:0.9;metalness:0;opacity:${(tr*0.92).toFixed(2)};transparent:true`); }
+    document.getElementById('hudHawk')
+      .setAttribute('value',`鏝板  ${makeBar(hawkMortar,100)} ${Math.floor(hawkMortar)}%`);
+    document.getElementById('hudTrowel')
+      .setAttribute('value',`鏝の泥 ${makeBar(trowelMortar,TROWEL_MAX)} ${Math.floor(trowelMortar/TROWEL_MAX*100)}%`);
+  }
+
+  /* ==================== ハイト更新 ==================== */
+  function renderHeight(p) {
+    const d=p.heightImgData.data;
+    for(let i=0;i<p.heightData.length;i++){
+      const v=Math.min(255,Math.floor(Math.max(0,p.heightData[i])/10*255));
+      d[i*4]=d[i*4+1]=d[i*4+2]=v; d[i*4+3]=255;
+    }
+    p.hCtx.putImageData(p.heightImgData,0,0);
+    p.heightTex.needsUpdate=true;
+  }
+
+  /* ==================== 塗り ==================== */
+  const MR=105,MG=102,MB=95;
+
+  function paintSurface(p, uvHits) {
+    if(uvHits.length<2||trowelMortar<=0) return;
+    const ctx=p.colorCtx, W=p.W, H=p.H;
+    const pts=uvHits.map(uv=>({x:uv.x*W,y:(1-uv.y)*H}));
+    const first=pts[0],last=pts[pts.length-1];
+    const mid=pts[Math.floor(pts.length/2)];
+    const midUV=uvHits[Math.floor(uvHits.length/2)];
+    const bdx=last.x-first.x,bdy=last.y-first.y;
+    const bladeLen=Math.sqrt(bdx*bdx+bdy*bdy);
+    const bladeAngle=Math.atan2(bdy,bdx);
+
+    let speed=0;
+    if(p.lastCenterUV){
+      const mdx=(midUV.x-p.lastCenterUV.x)*W,mdy=-(midUV.y-p.lastCenterUV.y)*H;
+      speed=Math.sqrt(mdx*mdx+mdy*mdy);
+    }
+    p.lastCenterUV={x:midUV.x,y:midUV.y};
+
+    const speedThin=Math.max(0,Math.min(1,speed/18));
+    const strokeFactor=(0.25+Math.random()*0.75)*(1-speedThin*0.55);
+    const strokeW=36+Math.min(speed*1.5,20);
+    const intensity=Math.min(1,trowelMortar/(TROWEL_MAX*0.25));
+
+    const thick=strokeFactor;
+    const cr=Math.round(MR-thick*18),cg=Math.round(MG-thick*16),cb=Math.round(MB-thick*14);
+
+    for(const pt of pts){
+      const alpha=(0.78*intensity*strokeFactor).toFixed(2);
+      const g=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,strokeW);
+      g.addColorStop(0,`rgba(${cr},${cg},${cb},${alpha})`);
+      g.addColorStop(0.65,`rgba(${cr+8},${cg+6},${cb+4},${(alpha*0.65).toFixed(2)})`);
+      g.addColorStop(1,`rgba(${cr},${cg},${cb},0)`);
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(pt.x,pt.y,strokeW,0,Math.PI*2); ctx.fill();
+    }
+
+    const halfBlade=bladeLen/2;
+    ctx.save(); ctx.translate(mid.x,mid.y); ctx.rotate(bladeAngle);
+    ctx.strokeStyle=`rgba(${MR+25},${MG+22},${MB+20},${(0.48*intensity*strokeFactor).toFixed(2)})`;
+    ctx.lineWidth=1.4;
+    [-1,1].forEach(s=>{
+      ctx.beginPath(); ctx.moveTo(-halfBlade*0.92,s*strokeW*0.82);
+      ctx.lineTo(halfBlade*0.92,s*strokeW*0.82); ctx.stroke();
     });
-    sceneEl.addEventListener('enter-vr', ()=>
-      UI_IDS.forEach(id=>document.getElementById(id).style.display='none'));
-    sceneEl.addEventListener('exit-vr',  ()=>
-      UI_IDS.forEach(id=>document.getElementById(id).style.display='block'));
+    const hi=ctx.createLinearGradient(-halfBlade*0.65,0,halfBlade*0.65,0);
+    hi.addColorStop(0,'rgba(195,192,184,0)');
+    hi.addColorStop(0.35,`rgba(195,192,184,${(0.16*intensity*(1-strokeFactor*0.5)).toFixed(2)})`);
+    hi.addColorStop(0.65,`rgba(195,192,184,${(0.16*intensity*(1-strokeFactor*0.5)).toFixed(2)})`);
+    hi.addColorStop(1,'rgba(195,192,184,0)');
+    ctx.fillStyle=hi; ctx.beginPath();
+    ctx.ellipse(0,0,halfBlade*0.65,strokeW*0.28,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
 
-    /* ==================== ハプティクス ====================
-       navigator.getGamepads() でIDに 'right' を含む
-       ゲームパッド (= ABボタン側) を直接指定する          */
-    function hapticPulse(intensity, durationMs) {
-      try {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        for (const gp of gamepads) {
-          if (!gp) continue;
-          /* Quest右コントローラーのIDは 'Right' を含む */
-          if (gp.id?.toLowerCase().includes('right') &&
-              gp.hapticActuators?.length > 0) {
-            gp.hapticActuators[0].pulse(intensity, durationMs);
-            return;
-          }
-        }
-      } catch(e) { /* ハプティクス非対応環境は無視 */ }
+    for(let i=0;i<45;i++){
+      const pt2=pts[Math.min(Math.floor(Math.random()*pts.length),pts.length-1)];
+      const gx=pt2.x+(Math.random()-0.5)*strokeW*2.4,gy=pt2.y+(Math.random()-0.5)*strokeW*2.4;
+      const v=Math.floor(78+Math.random()*40-strokeFactor*12);
+      ctx.fillStyle=`rgba(${v},${v-1},${v-3},${((0.22+Math.random()*0.42)*intensity*strokeFactor).toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(gx,gy,Math.random()*1.9+0.3,0,Math.PI*2); ctx.fill();
     }
 
-    /* ==================== ハイトマップ (Float32バッファ方式) ====================
-       Uint8(0-255)ではなく float の高さバッファで管理することで
-       何度でも重ね塗り・均しで厚みを変更できる                              */
-    const heightCanvas = document.getElementById('heightCanvas');
-    const hCtx         = heightCanvas.getContext('2d');
-    const HW = heightCanvas.width, HH = heightCanvas.height;
-
-    /* 高さバッファ: 0.0 = 平坦, 積み上げるほど大きくなる */
-    let heightData  = new Float32Array(HW * HH);
-    const H_DISPLAY = 10.0;  // この値を白(最大変位)として表示する基準
-
-    let heightMap = null;
-    let heightImageData = hCtx.createImageData(HW, HH);
-
-    /* heightData → Canvas → displacementMap を更新 */
-    function renderHeightToCanvas() {
-      const d = heightImageData.data;
-      for (let i = 0; i < heightData.length; i++) {
-        const v = Math.min(255, Math.floor(Math.max(0, heightData[i]) / H_DISPLAY * 255));
-        d[i*4] = d[i*4+1] = d[i*4+2] = v;
-        d[i*4+3] = 255;
-      }
-      hCtx.putImageData(heightImageData, 0, 0);
-      if (heightMap) heightMap.needsUpdate = true;
-    }
-
-    /* 初期化: 真っ黒 */
-    hCtx.fillStyle = '#000';
-    hCtx.fillRect(0, 0, HW, HH);
-
-    sceneEl.addEventListener('loaded', () => {
-      const wallEl = document.getElementById('wall');
-      const mesh   = wallEl.getObject3D('mesh');
-      if (!mesh) return;
-      heightMap = new THREE.CanvasTexture(heightCanvas);
-      mesh.material.displacementMap   = heightMap;
-      mesh.material.displacementScale = 0.04;
-      mesh.material.displacementBias  = 0;
-      mesh.material.needsUpdate       = true;
-    });
-
-    function markHeightDirty() { /* 廃止: renderHeightToCanvas で一括更新 */ }
-
-    /* 塗り: Float32バッファに高さを加算 (strokeFactor で量を変える) */
-    function paintHeight(uvHits, strokeFactor = 1.0) {
-      const r = Math.round(HW * 0.084 / 1.2 * 0.6);
-      for (const uv of uvHits) {
-        const cx = Math.floor(uv.x * HW);
-        const cy = Math.floor((1 - uv.y) * HH);
-        for (let y = Math.max(0, cy-r); y < Math.min(HH, cy+r+1); y++) {
-          for (let x = Math.max(0, cx-r); x < Math.min(HW, cx+r+1); x++) {
-            const dist = Math.sqrt((x-cx)**2 + (y-cy)**2);
-            if (dist > r) continue;
-            const falloff = 1 - dist / r;
-            heightData[y * HW + x] += falloff * strokeFactor * 0.85;
-          }
+    /* 厚みマップ & 塗りすぎ警告 */
+    let avgT=0,avgCnt=0;
+    for(const pt of pts){
+      const r=Math.ceil(strokeW);
+      for(let y=Math.max(0,Math.floor(pt.y-r));y<Math.min(H,Math.ceil(pt.y+r));y++){
+        for(let x=Math.max(0,Math.floor(pt.x-r));x<Math.min(W,Math.ceil(pt.x+r));x++){
+          const d2=(x-pt.x)**2+(y-pt.y)**2; if(d2>r*r) continue;
+          const idx=y*W+x;
+          if(Math.random()<(1-Math.sqrt(d2)/r)*0.22){if(p.thicknessMap[idx]<255)p.thicknessMap[idx]++;}
+          avgT+=p.thicknessMap[idx]; avgCnt++;
         }
       }
-      renderHeightToCanvas();
     }
-
-    /* 均し: 高さを削り取る */
-    function smoothHeight(uvHits) {
-      const r = Math.round(HW * 0.084 / 1.2 * 0.8);
-      for (const uv of uvHits) {
-        const cx = Math.floor(uv.x * HW);
-        const cy = Math.floor((1 - uv.y) * HH);
-        for (let y = Math.max(0, cy-r); y < Math.min(HH, cy+r+1); y++) {
-          for (let x = Math.max(0, cx-r); x < Math.min(HW, cx+r+1); x++) {
-            const dist = Math.sqrt((x-cx)**2 + (y-cy)**2);
-            if (dist > r) continue;
-            const falloff = 1 - dist / r;
-            const idx = y * HW + x;
-            heightData[idx] = Math.max(0, heightData[idx] - falloff * 0.35);
-          }
-        }
-      }
-      renderHeightToCanvas();
-    }
-
-    /* ==================== 壁カラーテクスチャ ==================== */
-    const wallCanvas = document.getElementById('wallCanvas');
-    const ctx        = wallCanvas.getContext('2d');
-    const W=wallCanvas.width, H=wallCanvas.height;
-    let thicknessMap = new Uint8Array(W*H);
-    const MR=105, MG=102, MB=95;
-
-    function drawBaseTexture() {
-      ctx.fillStyle='#C8C2B8'; ctx.fillRect(0,0,W,H);
-      for (let i=0;i<6000;i++) {
-        const x=Math.random()*W, y=Math.random()*H;
-        const v=Math.floor(180+Math.random()*40);
-        ctx.fillStyle=`rgba(${v},${v-2},${v-5},${0.15+Math.random()*0.25})`;
-        ctx.beginPath(); ctx.arc(x,y,Math.random()*1.8+0.3,0,Math.PI*2); ctx.fill();
-      }
-      ctx.strokeStyle='rgba(140,135,128,0.12)'; ctx.lineWidth=0.8;
-      for (let i=0;i<30;i++) {
-        const x0=Math.random()*W, y0=Math.random()*H;
-        ctx.beginPath(); ctx.moveTo(x0,y0);
-        ctx.lineTo(x0+(Math.random()-0.5)*60,y0+(Math.random()-0.5)*60); ctx.stroke();
-      }
-    }
-    drawBaseTexture();
-
-    function resetWallCanvas() {
-      thicknessMap = new Uint8Array(W*H);
-      drawBaseTexture();
-      heightData = new Float32Array(HW * HH);
-      hCtx.fillStyle = '#000'; hCtx.fillRect(0, 0, HW, HH);
-      if (heightMap) heightMap.needsUpdate = true;
-      lastCenterUV = null;
-      markTextureDirty();
-      updateCoverage();
-    }
-
-    function markTextureDirty() {
-      const mesh=document.getElementById('wall').getObject3D('mesh');
-      if (mesh&&mesh.material&&mesh.material.map) mesh.material.map.needsUpdate=true;
-    }
-
-    /* ==================== モルタルシステム ==================== */
-    let hawkMortar   = 100;
-    let trowelMortar = 0;
-    const TROWEL_MAX  = 60;
-    const SCOOP_RATE  = 2.5;
-    const PAINT_COST  = 0.35;
-    const SCOOP_DIST  = 0.22;
-
-    function makeBar(val, max, len=8) {
-      const n=Math.round(Math.max(0,Math.min(val/max,1))*len);
-      return '█'.repeat(n)+'░'.repeat(len-n);
-    }
-
-    function updateMortarVisuals() {
-      const hViz=document.getElementById('hawkMortarViz');
-      if (hViz) {
-        const hr=Math.max(0.02,hawkMortar/100);
-        hViz.setAttribute('scale',`${hr*0.22} ${hr*0.05} ${hr*0.22}`);
-      }
-      const tViz=document.getElementById('trowelMortarViz');
-      if (tViz) {
-        const tr=trowelMortar/TROWEL_MAX;
-        tViz.setAttribute('material',
-          `color:#828278; roughness:0.9; metalness:0; opacity:${(tr*0.92).toFixed(2)}; transparent:true`);
-      }
-      document.getElementById('hudHawk')
-        .setAttribute('value',`鏝板  ${makeBar(hawkMortar,100)} ${Math.floor(hawkMortar)}%`);
-      document.getElementById('hudTrowel')
-        .setAttribute('value',`鏝の泥 ${makeBar(trowelMortar,TROWEL_MAX)} ${Math.floor(trowelMortar/TROWEL_MAX*100)}%`);
-    }
-
-    /* ==================== 鏝波 (Kote-Nami) ====================
-       ストローク方向に沿って並行な暗線・明線を描く
-       type: 'paint' → 細かくくっきり / 'smooth' → 広く浅い      */
-    function drawKoteNami(mid, halfBlade, bladeAngle, strokeW, intensity, type) {
-      const isPaint  = type === 'paint';
-      const spacing  = isPaint ? 7  : 15;
-      const waveFreq = isPaint ? 0.055 : 0.03;
-      const numLines = Math.ceil((strokeW * 2) / spacing) + 1;
-      const bladeLen = halfBlade * 2;
-      const STEPS    = Math.max(20, Math.ceil(bladeLen / 5));
-
-      ctx.save();
-      ctx.translate(mid.x, mid.y);
-      ctx.rotate(bladeAngle);
-
-      /* ---- 長辺からの波 (振幅・太さが中央で大きく端で小さい) ---- */
-      for (let i = -Math.floor(numLines/2); i <= Math.floor(numLines/2); i++) {
-        const yOff      = i * spacing;
-        const edgeFall  = 1 - Math.abs(yOff) / (strokeW * 1.1);
-        if (edgeFall <= 0) continue;
-
-        /* ★ 中央に向かって振幅が増すコサイン包絡線 */
-        const ampScale  = Math.pow(Math.cos(Math.abs(yOff) / strokeW * Math.PI * 0.5), 0.6);
-        const waveAmp   = (isPaint ? 4.2 : 1.8) * ampScale;
-
-        /* ★ 線の太さも中央で太く */
-        const lineW     = isPaint ? (0.7 + 1.6 * ampScale) : (0.5 + 0.9 * ampScale);
-
-        const alpha     = (isPaint ? 0.40 : 0.18) * edgeFall * Math.min(1, intensity);
-        const isDark    = (i % 2 === 0);
-        const r = isDark ? 52  : 178;
-        const g = isDark ? 49  : 172;
-        const b = isDark ? 43  : 164;
-
-        ctx.strokeStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
-        ctx.lineWidth   = lineW;
-        ctx.beginPath();
-        for (let s = 0; s <= STEPS; s++) {
-          const x    = -halfBlade + s * (bladeLen / STEPS);
-          const wave = Math.sin(x * waveFreq + i * 1.1) * waveAmp
-                     + Math.sin(x * waveFreq * 2.4 + i * 0.7) * waveAmp * 0.28;
-          if (s === 0) ctx.moveTo(x, yOff + wave);
-          else         ctx.lineTo(x, yOff + wave);
-        }
-        ctx.stroke();
-      }
-
-      /* ---- 先端からの波 (移動方向に平行) ---- */
-      const tipSpacing  = isPaint ? 13 : 24;
-      const tipWaveFreq = isPaint ? 0.09 : 0.04;
-      const numTipLines = Math.ceil((halfBlade * 2) / tipSpacing) + 1;
-      const TIP_STEPS   = Math.max(12, Math.ceil(strokeW * 2 / 4));
-
-      for (let j = -Math.floor(numTipLines/2); j <= Math.floor(numTipLines/2); j++) {
-        const yPos      = j * tipSpacing;
-        const falloff   = 1 - Math.abs(yPos) / (halfBlade * 1.1);
-        if (falloff <= 0) continue;
-
-        /* 先端も中央の刃幅付近で振幅が大きい */
-        const ampScale2 = Math.pow(Math.cos(Math.abs(yPos) / halfBlade * Math.PI * 0.48), 0.5);
-        const tipAmp    = (isPaint ? 2.2 : 1.0) * ampScale2;
-        const tipLineW  = isPaint ? (0.7 + 0.7 * ampScale2) : (0.5 + 0.4 * ampScale2);
-
-        const alpha     = (isPaint ? 0.22 : 0.10) * falloff * Math.min(1, intensity);
-        const isDark    = (j % 2 !== 0);
-        const r = isDark ? 48  : 165;
-        const g = isDark ? 46  : 160;
-        const b = isDark ? 40  : 152;
-
-        ctx.strokeStyle = `rgba(${r},${g},${b},${alpha.toFixed(3)})`;
-        ctx.lineWidth   = tipLineW;
-        ctx.beginPath();
-        for (let s = 0; s <= TIP_STEPS; s++) {
-          const x    = -strokeW + s * (strokeW * 2 / TIP_STEPS);
-          const wave = Math.sin(x * tipWaveFreq + j * 0.9) * tipAmp
-                     + Math.sin(x * tipWaveFreq * 1.8 + j * 1.3) * tipAmp * 0.38;
-          if (s === 0) ctx.moveTo(x, yPos + wave);
-          else         ctx.lineTo(x, yPos + wave);
-        }
-        ctx.stroke();
-      }
-
-      ctx.restore();
-    }
-
-    /* ---- 始端・終端の弧状跡 ----
-       鏝が壁に当たった瞬間と離れた瞬間に
-       刃全長にまたがる弧を描く              */
-    function drawStrokeEdge(mid, halfBlade, bladeAngle, isEntry) {
-      ctx.save();
-      ctx.translate(mid.x, mid.y);
-      ctx.rotate(bladeAngle);
-
-      /* isEntry: 鏝が入るとき → 進行方向側に弓なりに凸
-         !isEntry: 鏝が出るとき → 反対方向に凸           */
-      const bulge = (isEntry ? -1 : 1) * (7 + Math.random() * 5);
-
-      ctx.strokeStyle = `rgba(52, 49, 43, 0.32)`;
-      ctx.lineWidth   = 1.6;
-      ctx.lineCap     = 'round';
-      ctx.beginPath();
-      ctx.moveTo(-halfBlade * 0.88, 0);
-      ctx.quadraticCurveTo(0, bulge, halfBlade * 0.88, 0);
-      ctx.stroke();
-
-      ctx.restore();
-    }
-
-    /* ==================== paintBlade ==================== */
-    let lastCenterUV = null;
-
-    function paintBlade(uvHits) {
-      if (uvHits.length<2||trowelMortar<=0) return;
-      const pts=uvHits.map(uv=>({x:uv.x*W, y:(1-uv.y)*H}));
-      const first=pts[0], last=pts[pts.length-1];
-      const mid=pts[Math.floor(pts.length/2)];
-      const midUV=uvHits[Math.floor(uvHits.length/2)];
-
-      const bdx=last.x-first.x, bdy=last.y-first.y;
-      const bladeLen=Math.sqrt(bdx*bdx+bdy*bdy);
-      const bladeAngle=Math.atan2(bdy,bdx);
-
-      let speed=0;
-      if (lastCenterUV) {
-        const mdx=(midUV.x-lastCenterUV.x)*W, mdy=-(midUV.y-lastCenterUV.y)*H;
-        speed=Math.sqrt(mdx*mdx+mdy*mdy);
-      }
-      lastCenterUV={x:midUV.x,y:midUV.y};
-
-      const intensity=Math.min(1,trowelMortar/(TROWEL_MAX*0.25));
-
-      /* ★ ストロークごとにランダムな塗り厚係数 (0.25〜1.0)
-           速く動かすほど薄くなる (遠心効果)             */
-      const speedThin   = Math.max(0, Math.min(1, speed / 18));  // 速度による薄さ
-      const strokeFactor = (0.25 + Math.random() * 0.75) * (1 - speedThin * 0.55);
-
-      const strokeW=36+Math.min(speed*1.5,20);
-
-      /* ★ 塗り厚で色を変える
-           strokeFactor高い(厚い) → 暗いモルタル色
-           strokeFactor低い(薄い) → 明るいグレー            */
-      const thick = strokeFactor; // 0.25〜1.0
-      const cr = Math.round(MR - thick * 18);  // 厚いほど暗く
-      const cg = Math.round(MG - thick * 16);
-      const cb = Math.round(MB - thick * 14);
-
-      for (const pt of pts) {
-        const alpha = (0.78 * intensity * strokeFactor).toFixed(2);
-        const g=ctx.createRadialGradient(pt.x,pt.y,0,pt.x,pt.y,strokeW);
-        g.addColorStop(0,    `rgba(${cr},${cg},${cb},${alpha})`);
-        g.addColorStop(0.65, `rgba(${cr+8},${cg+6},${cb+4},${(alpha*0.65).toFixed(2)})`);
-        g.addColorStop(1,    `rgba(${cr},${cg},${cb},0)`);
-        ctx.fillStyle=g; ctx.beginPath(); ctx.arc(pt.x,pt.y,strokeW,0,Math.PI*2); ctx.fill();
-      }
-      const halfBlade=bladeLen/2;
+    if(avgCnt>0&&avgT/avgCnt>5){
       ctx.save(); ctx.translate(mid.x,mid.y); ctx.rotate(bladeAngle);
-      ctx.strokeStyle=`rgba(${MR+25},${MG+22},${MB+20},${(0.48*intensity*strokeFactor).toFixed(2)})`;
-      ctx.lineWidth=1.4;
-      [-1,1].forEach(s=>{
-        ctx.beginPath(); ctx.moveTo(-halfBlade*0.92,s*strokeW*0.82);
-        ctx.lineTo(halfBlade*0.92,s*strokeW*0.82); ctx.stroke();
-      });
-      const hi=ctx.createLinearGradient(-halfBlade*0.65,0,halfBlade*0.65,0);
-      hi.addColorStop(0,'rgba(195,192,184,0)');
-      hi.addColorStop(0.35,`rgba(195,192,184,${(0.16*intensity*(1-strokeFactor*0.5)).toFixed(2)})`);
-      hi.addColorStop(0.65,`rgba(195,192,184,${(0.16*intensity*(1-strokeFactor*0.5)).toFixed(2)})`);
-      hi.addColorStop(1,'rgba(195,192,184,0)');
-      ctx.fillStyle=hi; ctx.beginPath();
-      ctx.ellipse(0,0,halfBlade*0.65,strokeW*0.28,0,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(255,80,60,0.55)'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.ellipse(0,0,halfBlade*0.65,strokeW*0.65,0,0,Math.PI*2); ctx.stroke();
       ctx.restore();
-      for (let i=0;i<45;i++) {
-        const p=pts[Math.min(Math.floor(Math.random()*pts.length),pts.length-1)];
-        const gx=p.x+(Math.random()-0.5)*strokeW*2.4, gy=p.y+(Math.random()-0.5)*strokeW*2.4;
-        const v=Math.floor(78+Math.random()*40 - strokeFactor*12); // 厚いほど暗い粒
-        ctx.fillStyle=`rgba(${v},${v-1},${v-3},${((0.22+Math.random()*0.42)*intensity*strokeFactor).toFixed(2)})`;
-        ctx.beginPath(); ctx.arc(gx,gy,Math.random()*1.9+0.3,0,Math.PI*2); ctx.fill();
-      }
-      // 厚みマップ & 塗りすぎ警告
-      let avgT=0,avgCnt=0;
-      for (const pt of pts) {
-        const r=Math.ceil(strokeW);
-        for (let y=Math.max(0,Math.floor(pt.y-r));y<Math.min(H,Math.ceil(pt.y+r));y++) {
-          for (let x=Math.max(0,Math.floor(pt.x-r));x<Math.min(W,Math.ceil(pt.x+r));x++) {
-            const d2=(x-pt.x)**2+(y-pt.y)**2; if(d2>r*r) continue;
-            const idx=y*W+x;
-            if(Math.random()<(1-Math.sqrt(d2)/r)*0.22){if(thicknessMap[idx]<255)thicknessMap[idx]++;}
-            avgT+=thicknessMap[idx]; avgCnt++;
-          }
+    }
+
+    drawKoteNami(ctx, mid, halfBlade, bladeAngle, strokeW, intensity*strokeFactor, 'paint');
+    p.colorTex.needsUpdate=true;
+
+    /* ハイトマップ */
+    _paintHeight(p, uvHits, strokeFactor);
+
+    trowelMortar=Math.max(0,trowelMortar-PAINT_COST);
+    if(trowelMortar===0) setMessage('泥がなくなりました。鏝板からすくってください');
+    updateMortarVisuals();
+  }
+
+  function smoothSurface(p, uvHits) {
+    if(uvHits.length<2) return;
+    const ctx=p.colorCtx, W=p.W, H=p.H;
+    const pts=uvHits.map(uv=>({x:uv.x*W,y:(1-uv.y)*H}));
+    const first=pts[0],last=pts[pts.length-1];
+    const mid=pts[Math.floor(pts.length/2)];
+    const bdx=last.x-first.x,bdy=last.y-first.y;
+    const bladeLen=Math.sqrt(bdx*bdx+bdy*bdy);
+    const bladeAngle=Math.atan2(bdy,bdx);
+    ctx.fillStyle='rgba(185,180,172,0.06)';
+    for(const pt of pts){ ctx.beginPath(); ctx.arc(pt.x,pt.y,40,0,Math.PI*2); ctx.fill(); }
+    drawKoteNami(ctx, mid, bladeLen/2, bladeAngle, 36, 1.0, 'smooth');
+    p.colorTex.needsUpdate=true;
+    _smoothHeight(p, uvHits);
+  }
+
+  function _paintHeight(p,uvHits,strokeFactor=1){
+    const r=Math.round(p.HW*0.084/1.2*0.6);
+    for(const uv of uvHits){
+      const cx=Math.floor(uv.x*p.HW),cy=Math.floor((1-uv.y)*p.HH);
+      for(let y=Math.max(0,cy-r);y<Math.min(p.HH,cy+r+1);y++){
+        for(let x=Math.max(0,cx-r);x<Math.min(p.HW,cx+r+1);x++){
+          const dist=Math.sqrt((x-cx)**2+(y-cy)**2); if(dist>r) continue;
+          p.heightData[y*p.HW+x]+=( (1-dist/r)*strokeFactor*0.85 );
         }
       }
-      if(avgCnt>0&&avgT/avgCnt>5){
-        ctx.save(); ctx.translate(mid.x,mid.y); ctx.rotate(bladeAngle);
-        ctx.strokeStyle='rgba(255,80,60,0.55)'; ctx.lineWidth=2.5;
-        ctx.beginPath(); ctx.ellipse(0,0,halfBlade*0.65,strokeW*0.65,0,0,Math.PI*2); ctx.stroke();
-        ctx.restore();
+    }
+    renderHeight(p);
+  }
+
+  function _smoothHeight(p,uvHits){
+    const r=Math.round(p.HW*0.084/1.2*0.8);
+    for(const uv of uvHits){
+      const cx=Math.floor(uv.x*p.HW),cy=Math.floor((1-uv.y)*p.HH);
+      for(let y=Math.max(0,cy-r);y<Math.min(p.HH,cy+r+1);y++){
+        for(let x=Math.max(0,cx-r);x<Math.min(p.HW,cx+r+1);x++){
+          const dist=Math.sqrt((x-cx)**2+(y-cy)**2); if(dist>r) continue;
+          const idx=y*p.HW+x;
+          p.heightData[idx]=Math.max(0,p.heightData[idx]-(1-dist/r)*0.35);
+        }
       }
-
-      /* 鏝波: 塗り (くっきり) */
-      drawKoteNami(mid, halfBlade, bladeAngle, strokeW, intensity * strokeFactor, 'paint');
-
-      markTextureDirty();
-
-      // ハイトマップにも盛り上がりを追加 (strokeFactorで高さを変化)
-      paintHeight(uvHits, strokeFactor);
-
-      trowelMortar=Math.max(0,trowelMortar-PAINT_COST);
-      if(trowelMortar===0) setMessage('泥がなくなりました。鏝板からすくってください');
-      updateMortarVisuals();
     }
+    renderHeight(p);
+  }
 
-    /* ==================== smoothBlade ==================== */
-    function smoothBlade(uvHits) {
-      if (uvHits.length < 2) return;
-      const pts  = uvHits.map(uv=>({x:uv.x*W, y:(1-uv.y)*H}));
-      const first = pts[0], last = pts[pts.length-1];
-      const mid   = pts[Math.floor(pts.length/2)];
-      const midUV = uvHits[Math.floor(uvHits.length/2)];
-
-      const bdx = last.x-first.x, bdy = last.y-first.y;
-      const bladeLen   = Math.sqrt(bdx*bdx+bdy*bdy);
-      const bladeAngle = Math.atan2(bdy, bdx);
-      const halfBlade  = bladeLen / 2;
-      const strokeW    = 36;
-
-      // カラーCanvas: 薄いベースグレーで均し感
-      ctx.fillStyle='rgba(185,180,172,0.06)';
-      for (const pt of pts) {
-        ctx.beginPath(); ctx.arc(pt.x,pt.y,40,0,Math.PI*2); ctx.fill();
+  /* ==================== 鏝波 ==================== */
+  function drawKoteNami(ctx, mid, halfBlade, bladeAngle, strokeW, intensity, type) {
+    const isPaint=type==='paint';
+    const spacing=isPaint?7:15, waveFreq=isPaint?0.055:0.03;
+    const numLines=Math.ceil((strokeW*2)/spacing)+1;
+    const bladeLen=halfBlade*2, STEPS=Math.max(20,Math.ceil(bladeLen/5));
+    ctx.save(); ctx.translate(mid.x,mid.y); ctx.rotate(bladeAngle);
+    for(let i=-Math.floor(numLines/2);i<=Math.floor(numLines/2);i++){
+      const yOff=i*spacing, edgeFall=1-Math.abs(yOff)/(strokeW*1.1);
+      if(edgeFall<=0) continue;
+      const ampScale=Math.pow(Math.cos(Math.abs(yOff)/strokeW*Math.PI*0.5),0.6);
+      const waveAmp=(isPaint?4.2:1.8)*ampScale;
+      const lineW=isPaint?(0.7+1.6*ampScale):(0.5+0.9*ampScale);
+      const alpha=(isPaint?0.40:0.18)*edgeFall*Math.min(1,intensity);
+      const isDark=(i%2===0);
+      const r=isDark?52:178,g=isDark?49:172,b=isDark?43:164;
+      ctx.strokeStyle=`rgba(${r},${g},${b},${alpha.toFixed(3)})`; ctx.lineWidth=lineW;
+      ctx.beginPath();
+      for(let s=0;s<=STEPS;s++){
+        const x=-halfBlade+s*(bladeLen/STEPS);
+        const wave=Math.sin(x*waveFreq+i*1.1)*waveAmp+Math.sin(x*waveFreq*2.4+i*0.7)*waveAmp*0.28;
+        if(s===0) ctx.moveTo(x,yOff+wave); else ctx.lineTo(x,yOff+wave);
       }
-
-      /* 鏝波: 均し (浅く広い) */
-      drawKoteNami(mid, halfBlade, bladeAngle, strokeW, 1.0, 'smooth');
-
-      markTextureDirty();
-
-      // ハイトマップ: 黒を重ねて盛り上がりを削る
-      smoothHeight(uvHits);
+      ctx.stroke();
     }
-
-    /* ==================== HUD / 採点 ==================== */
-    function updateCoverage() {
-      let painted=0;
-      for(let i=0;i<thicknessMap.length;i++) if(thicknessMap[i]>0) painted++;
-      document.getElementById('hudCoverage')
-        .setAttribute('value',`塗布率 ${makeBar(painted,thicknessMap.length)} ${(painted/thicknessMap.length*100).toFixed(0)}%`);
+    const tipSpacing=isPaint?13:24, tipWaveFreq=isPaint?0.09:0.04;
+    const numTipLines=Math.ceil((halfBlade*2)/tipSpacing)+1;
+    const TIP_STEPS=Math.max(12,Math.ceil(strokeW*2/4));
+    for(let j=-Math.floor(numTipLines/2);j<=Math.floor(numTipLines/2);j++){
+      const yPos=j*tipSpacing, falloff=1-Math.abs(yPos)/(halfBlade*1.1);
+      if(falloff<=0) continue;
+      const ampScale2=Math.pow(Math.cos(Math.abs(yPos)/halfBlade*Math.PI*0.48),0.5);
+      const tipAmp=(isPaint?2.2:1.0)*ampScale2;
+      const tipLineW=isPaint?(0.7+0.7*ampScale2):(0.5+0.4*ampScale2);
+      const alpha=(isPaint?0.22:0.10)*falloff*Math.min(1,intensity);
+      const isDark=(j%2!==0);
+      const r=isDark?48:165,g=isDark?46:160,b=isDark?40:152;
+      ctx.strokeStyle=`rgba(${r},${g},${b},${alpha.toFixed(3)})`; ctx.lineWidth=tipLineW;
+      ctx.beginPath();
+      for(let s=0;s<=TIP_STEPS;s++){
+        const x=-strokeW+s*(strokeW*2/TIP_STEPS);
+        const wave=Math.sin(x*tipWaveFreq+j*0.9)*tipAmp+Math.sin(x*tipWaveFreq*1.8+j*1.3)*tipAmp*0.38;
+        if(s===0) ctx.moveTo(x,yPos+wave); else ctx.lineTo(x,yPos+wave);
+      }
+      ctx.stroke();
     }
+    ctx.restore();
+  }
 
-    let msgTimer=null;
-    function setMessage(msg) {
-      document.getElementById('hudMessage').setAttribute('value',msg);
-      clearTimeout(msgTimer);
-      msgTimer=setTimeout(()=>document.getElementById('hudMessage').setAttribute('value',''),4000);
+  function drawStrokeEdge(mid, halfBlade, bladeAngle, isEntry, ctx) {
+    if(!ctx) return;
+    ctx.save(); ctx.translate(mid.x,mid.y); ctx.rotate(bladeAngle);
+    const bulge=(isEntry?-1:1)*(7+Math.random()*5);
+    ctx.strokeStyle='rgba(52,49,43,0.32)'; ctx.lineWidth=1.6; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(-halfBlade*0.88,0);
+    ctx.quadraticCurveTo(0,bulge,halfBlade*0.88,0); ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ==================== HUD ==================== */
+  function updateCoverage(p) {
+    if(!p) return;
+    let painted=0;
+    for(let i=0;i<p.thicknessMap.length;i++) if(p.thicknessMap[i]>0) painted++;
+    document.getElementById('hudCoverage')
+      .setAttribute('value',`塗布率 ${makeBar(painted,p.thicknessMap.length)} ${(painted/p.thicknessMap.length*100).toFixed(0)}%`);
+  }
+
+  let msgTimer=null;
+  function setMessage(msg){
+    document.getElementById('hudMessage').setAttribute('value',msg);
+    clearTimeout(msgTimer);
+    msgTimer=setTimeout(()=>document.getElementById('hudMessage').setAttribute('value',''),4000);
+  }
+
+  document.getElementById('resetBtn').addEventListener('click',()=>{
+    /* 全ペインターをリセット */
+    for(const e of wallRegistry) if(e.painter) resetPainter(e.painter);
+    setMessage('全壁をリセットしました');
+  });
+  document.getElementById('gradeBtn').addEventListener('click',()=>{
+    /* 静的壁のスコア */
+    const p=staticPainter;
+    let painted=0,target=0;
+    for(let i=0;i<p.thicknessMap.length;i++){
+      const t=p.thicknessMap[i]; if(t>0)painted++; if(t>=2&&t<=5)target++;
     }
+    const cov=(painted/p.thicknessMap.length*100).toFixed(0);
+    const uni=painted>0?(target/painted*100).toFixed(0):0;
+    const tot=((painted/p.thicknessMap.length)*(target/Math.max(painted,1))*100).toFixed(0);
+    setMessage(`塗布率 ${cov}% / 均一 ${uni}% / 総合 ${tot}点`);
+  });
 
-    document.getElementById('resetBtn').addEventListener('click',()=>{
-      resetWallCanvas(); setMessage('壁をリセットしました');
+  /* ==================== 操作説明パネル ==================== */
+  (function drawOpsPanel(){
+    const c=document.getElementById('opsCanvas');
+    const c2d=c.getContext('2d'); const CW=c.width,CH=c.height;
+    c2d.fillStyle='rgba(0,0,0,0.78)'; c2d.roundRect(0,0,CW,CH,32); c2d.fill();
+    c2d.font='bold 44px sans-serif'; c2d.fillStyle='#fff'; c2d.textAlign='center';
+    c2d.fillText('操作方法',CW/2,68);
+    c2d.strokeStyle='rgba(255,255,255,0.2)'; c2d.lineWidth=2;
+    c2d.beginPath(); c2d.moveTo(40,88); c2d.lineTo(CW-40,88); c2d.stroke();
+    const items=[
+      {label:'Ⓐ',          desc:'静的壁を設置',   color:'#80EFFF'},
+      {label:'右グリップ',  desc:'均しモード',     color:'#FFD080'},
+      {label:'左グリップ',  desc:'鏝板を補充',     color:'#FFD080'},
+      {label:'鏝板に近づく',desc:'すくう',         color:'#88FF88'},
+      {label:'壁に近づく',  desc:'塗る',           color:'#88FF88'},
+      {label:'左レーザー',  desc:'採点/リセット',  color:'#dddddd'},
+    ];
+    c2d.textAlign='left';
+    items.forEach((item,i)=>{
+      const y=148+i*60;
+      c2d.font='bold 32px sans-serif'; c2d.fillStyle=item.color; c2d.fillText(item.label,44,y);
+      c2d.fillStyle='rgba(255,255,255,0.35)'; c2d.fillText(':',238,y);
+      c2d.font='32px sans-serif'; c2d.fillStyle='#fff'; c2d.fillText(item.desc,258,y);
     });
-    document.getElementById('gradeBtn').addEventListener('click',()=>{
-      let painted=0,target=0;
-      for(let i=0;i<thicknessMap.length;i++){
-        const t=thicknessMap[i]; if(t>0)painted++; if(t>=2&&t<=5)target++;
-      }
-      const cov=(painted/thicknessMap.length*100).toFixed(0);
-      const uni=painted>0?(target/painted*100).toFixed(0):0;
-      const tot=((painted/thicknessMap.length)*(target/Math.max(painted,1))*100).toFixed(0);
-      setMessage(`塗布率 ${cov}% / 均一 ${uni}% / 総合 ${tot}点`);
-    });
+  })();
 
-    updateCoverage();
-    updateMortarVisuals();
+  updateMortarVisuals();
   </script>
 </body>
 </html>
